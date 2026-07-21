@@ -25,7 +25,7 @@ CLIENT_DIRS = {
 }
 SOURCES = {"self", "vendor", "external", "plugin"}
 MANIFEST_VERSION = 1
-PENDING_REVIEW = "待人工确认是否为有意的单端专属"
+PENDING_REVIEW = "needs review: single-client skill, confirm if intentional"
 
 
 class SkxError(Exception):
@@ -72,10 +72,10 @@ def scope_clients(scope: Any) -> tuple[str, ...]:
     if scope == "shared":
         return CLIENTS
     if not isinstance(scope, list) or not scope:
-        raise SkxError("scope 必须是 'shared' 或非空端名数组")
+        raise SkxError("scope must be 'shared' or a non-empty list of client names")
     invalid = [item for item in scope if item not in CLIENTS]
     if invalid:
-        raise SkxError(f"scope 含无效端名：{', '.join(map(str, invalid))}")
+        raise SkxError(f"scope contains unknown client name(s): {', '.join(map(str, invalid))}")
     return tuple(client for client in CLIENTS if client in scope)
 
 
@@ -89,21 +89,21 @@ def scope_label(scope: Any) -> str:
 
 def validate_entry(entry: Any) -> dict[str, Any]:
     if not isinstance(entry, dict):
-        raise SkxError("manifest 的 skills 每一项必须是对象")
+        raise SkxError("each manifest skills entry must be an object")
     required = ("name", "source", "body", "scope")
     missing = [key for key in required if key not in entry]
     if missing:
-        raise SkxError(f"manifest 条目缺字段：{', '.join(missing)}")
+        raise SkxError(f"manifest entry is missing field(s): {', '.join(missing)}")
     name = entry["name"]
     if not isinstance(name, str) or not name or "/" in name or name in {".", ".."}:
-        raise SkxError(f"无效 skill 名：{name!r}")
+        raise SkxError(f"invalid skill name: {name!r}")
     if entry["source"] not in SOURCES:
-        raise SkxError(f"{name} 的 source 无效：{entry['source']!r}")
+        raise SkxError(f"{name} has an invalid source: {entry['source']!r}")
     if not isinstance(entry["body"], str) or not entry["body"]:
-        raise SkxError(f"{name} 的 body 必须是路径字符串")
+        raise SkxError(f"{name}: body must be a path string")
     scope_clients(entry["scope"])
     if entry["source"] == "plugin" and scope_clients(entry["scope"]) != ("claude",):
-        raise SkxError(f"plugin {name} 必须是 claude 单端作用域")
+        raise SkxError(f"plugin {name} must be scoped to claude only")
     return dict(entry)
 
 
@@ -111,20 +111,20 @@ def read_manifest(path: Path, allow_missing: bool = False) -> dict[str, Any]:
     if not path.exists():
         if allow_missing:
             return {"version": MANIFEST_VERSION, "skills": []}
-        raise SkxError(f"manifest 不存在：{path}；请先运行 skx scan --write")
+        raise SkxError(f"manifest not found: {path}; run `skx scan --write` first")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SkxError(f"无法读取 manifest {path}：{exc}") from exc
+        raise SkxError(f"cannot read manifest {path}: {exc}") from exc
     if not isinstance(data, dict) or data.get("version") != MANIFEST_VERSION:
-        raise SkxError(f"manifest version 必须是 {MANIFEST_VERSION}")
+        raise SkxError(f"manifest version must be {MANIFEST_VERSION}")
     if not isinstance(data.get("skills"), list):
-        raise SkxError("manifest 缺少 skills 数组")
+        raise SkxError("manifest is missing the skills array")
     entries = [validate_entry(item) for item in data["skills"]]
     names = [item["name"] for item in entries]
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
-        raise SkxError(f"manifest skill 重名：{', '.join(duplicates)}")
+        raise SkxError(f"duplicate skill name(s) in manifest: {', '.join(duplicates)}")
     return {"version": MANIFEST_VERSION, "skills": entries}
 
 
@@ -169,7 +169,7 @@ def visible_entries(directory: Path) -> dict[str, Path]:
             if not item.name.startswith(".")
         }
     except OSError as exc:
-        raise SkxError(f"无法扫描 {directory}：{exc}") from exc
+        raise SkxError(f"cannot scan {directory}: {exc}") from exc
 
 
 def scan_plugins(cfg: dict[str, Path], occupied: set[str]) -> list[dict[str, Any]]:
@@ -245,26 +245,26 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
 def inspect_path(path: Path, body: Path, expected: bool) -> dict[str, Any]:
     base: dict[str, Any] = {"path": str(path), "expected": expected}
     if not path_exists(path):
-        base.update(state="missing" if expected else "not_applicable", detail="缺失" if expected else "不适用")
+        base.update(state="missing" if expected else "not_applicable", detail="missing" if expected else "not applicable")
         return base
     if not expected:
-        kind = "软链" if path.is_symlink() else "真实目录" if path.is_dir() else "真实文件"
-        base.update(state="extra", detail=f"多余{kind}")
+        kind = "symlink" if path.is_symlink() else "real directory" if path.is_dir() else "real file"
+        base.update(state="extra", detail=f"extra {kind}")
         return base
     if path.is_symlink():
         target = link_target(path)
         base["target"] = str(target)
         if not path.exists():
-            base.update(state="orphan_link", detail="断链/孤儿链")
+            base.update(state="orphan_link", detail="broken symlink (orphan link)")
         elif target != normalized(body):
-            base.update(state="wrong_target", detail="软链目标不符")
+            base.update(state="wrong_target", detail="symlink target mismatch")
         else:
-            base.update(state="healthy", detail="软链健康")
+            base.update(state="healthy", detail="symlink healthy")
         return base
     if path.is_dir():
-        base.update(state="real_directory", detail="真实目录遮蔽")
+        base.update(state="real_directory", detail="real directory shadows the link")
     else:
-        base.update(state="real_file", detail="真实文件遮蔽")
+        base.update(state="real_file", detail="real file shadows the link")
     return base
 
 
@@ -286,14 +286,14 @@ def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str,
                     "path": str(body),
                     "expected": True,
                     "state": "plugin" if plugin_ok else "plugin_missing",
-                    "detail": "插件已安装" if plugin_ok else "插件本体缺失",
+                    "detail": "plugin installed" if plugin_ok else "plugin body missing",
                 }
                 for client in ("codex", "kimi"):
                     clients[client] = {
                         "path": str(cfg[client] / name),
                         "expected": False,
                         "state": "not_applicable",
-                        "detail": "不适用",
+                        "detail": "not applicable",
                     }
             else:
                 clients = {
@@ -318,7 +318,7 @@ def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str,
                     "body": str(body),
                     "scope": present,
                     "declared": False,
-                    "review": "未写入 manifest",
+                    "review": "not declared in manifest",
                     "clients": {
                         client: inspect_path(cfg[client] / name, body, False)
                         for client in CLIENTS
@@ -356,50 +356,95 @@ def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str,
 
 
 STATE_MARKS = {
-    "healthy": "✓ 软链健康",
-    "plugin": "✓ 插件",
+    "healthy": "✓ linked",
+    "plugin": "✓ plugin",
     "not_applicable": "—",
-    "missing": "○ 缺失",
-    "plugin_missing": "! 插件缺失",
-    "orphan_link": "! 断链",
-    "wrong_target": "! 目标不符",
-    "real_directory": "! 真实目录",
-    "real_file": "! 真实文件",
-    "extra": "! 多余",
+    "missing": "○ missing",
+    "plugin_missing": "! plugin gone",
+    "orphan_link": "! broken",
+    "wrong_target": "! mismatch",
+    "real_directory": "! real dir",
+    "real_file": "! real file",
+    "extra": "! extra",
 }
+
+GOOD_STATES = {"healthy", "plugin", "not_applicable"}
 
 
 def display_width(text: str) -> int:
-    return sum(2 if unicodedata.east_asian_width(char) in "WFA" else 1 for char in text)
+    # 只把 W/F（真正的宽字符，如 CJK）算作 2 列；A（歧义字符，如 — ○ ─）在英文终端按 1 列渲染
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
 
 
 def pad(text: str, width: int) -> str:
     return text + " " * (width - display_width(text))
 
 
+def table_cells(row: dict[str, Any]) -> tuple[str, ...]:
+    return (
+        row["name"],
+        row["source"],
+        scope_label(row["scope"]),
+        *(STATE_MARKS[row["clients"][client]["state"]] for client in CLIENTS),
+    )
+
+
+def has_anomaly(row: dict[str, Any]) -> bool:
+    return any(row["clients"][client]["state"] not in GOOD_STATES for client in CLIENTS)
+
+
 def render_table(inventory: dict[str, Any]) -> None:
-    headers = ("skill", "来源", "作用域", "claude", "codex", "kimi")
-    lines: list[tuple[str, ...]] = []
+    headers = ("skill", "source", "scope", "claude", "codex", "kimi")
+    shared: list[dict[str, Any]] = []
+    specific: list[dict[str, Any]] = []
+    attention: list[dict[str, Any]] = []
     for row in inventory["skills"]:
-        lines.append(
-            (
-                row["name"],
-                row["source"],
-                scope_label(row["scope"]),
-                *(STATE_MARKS[row["clients"][client]["state"]] for client in CLIENTS),
-            )
+        if row["scope"] == "shared" and all(
+            row["clients"][client]["state"] == "healthy" for client in CLIENTS
+        ):
+            shared.append(row)
+        elif has_anomaly(row):
+            attention.append(row)
+        else:
+            specific.append(row)
+    shared.sort(key=lambda row: row["name"].casefold())
+    specific.sort(
+        key=lambda row: (
+            CLIENTS.index(scope_clients(row["scope"])[0])
+            if row["scope"] != "shared"
+            else len(CLIENTS),
+            row["name"].casefold(),
         )
+    )
+    attention.sort(key=lambda row: row["name"].casefold())
+    sections = [
+        ("SHARED (all three clients)", shared),
+        ("CLIENT-SPECIFIC", specific),
+        ("NEEDS ATTENTION", attention),
+    ]
+    sections = [(title, rows) for title, rows in sections if rows]
     widths = [display_width(header) for header in headers]
-    for line in lines:
-        widths = [max(width, display_width(cell)) for width, cell in zip(widths, line)]
+    for _, rows in sections:
+        for row in rows:
+            widths = [
+                max(width, display_width(cell))
+                for width, cell in zip(widths, table_cells(row))
+            ]
+    rule = "─" * (sum(widths) + 2 * (len(widths) - 1))
     print("  ".join(pad(header, width) for header, width in zip(headers, widths)))
     print("  ".join("─" * width for width in widths))
-    for line in lines:
-        print("  ".join(pad(cell, width) for cell, width in zip(line, widths)))
+    for title, rows in sections:
+        print(f"\n{title}")
+        print(rule)
+        for row in rows:
+            print("  ".join(pad(cell, width) for cell, width in zip(table_cells(row), widths)))
     summary = inventory["summary"]
+    skills = summary["skills"]
+    anomalies = summary["anomalies"]
     print(
-        f"\n共 {summary['skills']} 个 skill，{summary['three_client_healthy']} 个三端齐全，"
-        f"{summary['anomalies']} 处异常（含 {summary['missing']} 处缺失）。"
+        f"\n{skills} skill{'s' if skills != 1 else ''} · "
+        f"{summary['three_client_healthy']} shared across all clients · "
+        f"{anomalies} issue{'s' if anomalies != 1 else ''}"
     )
 
 
@@ -416,14 +461,14 @@ def repair_for(row: dict[str, Any], client: str, status: dict[str, Any]) -> str:
     if state in {"real_directory", "real_file", "wrong_target", "orphan_link"}:
         backup = Path(f"{path}.skx-backup")
         if not body.exists():
-            return f"先恢复本体 {shlex.quote(str(body))}，再重建 {shlex.quote(str(path))}"
+            return f"restore the body {shlex.quote(str(body))} first, then rebuild {shlex.quote(str(path))}"
         return f"{shell_join('mv', path, backup)} && {shell_join('ln', '-s', body, path)}"
     if state == "extra":
         return shell_join("mv", path, Path(f"{path}.unmanaged-backup"))
     if state == "plugin_missing":
         plugin_id = row.get("plugin_id", row["name"])
-        return f"用 Claude Code 重新安装插件 {shlex.quote(str(plugin_id))}"
-    return "无需修复"
+        return f"reinstall plugin {shlex.quote(str(plugin_id))} with Claude Code"
+    return "no repair needed"
 
 
 def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
@@ -451,8 +496,8 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
                         "skill": row["name"],
                         "client": None,
                         "path": row["body"],
-                        "message": "manifest 声明的本体不存在",
-                        "suggested_command": f"从版本库或备份恢复 {shlex.quote(row['body'])}",
+                        "message": "the body declared in the manifest does not exist",
+                        "suggested_command": f"restore {shlex.quote(row['body'])} from version control or a backup",
                     }
                 )
                 body_reported.add(row["name"])
@@ -462,13 +507,13 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
             if state in {"healthy", "plugin", "not_applicable"}:
                 continue
             messages = {
-                "missing": "与 manifest 声明不符：缺少软链",
-                "plugin_missing": "Claude 插件本体不存在",
-                "orphan_link": "断链/孤儿链：软链指向不存在的本体",
-                "wrong_target": "软链目标与 manifest 声明不符",
-                "real_directory": "真实目录遮蔽了应有软链",
-                "real_file": "真实文件遮蔽了应有软链",
-                "extra": "与 manifest 声明不符：存在多余项",
+                "missing": "manifest declares a symlink that is missing",
+                "plugin_missing": "the Claude plugin body does not exist",
+                "orphan_link": "broken symlink: the target body does not exist",
+                "wrong_target": "symlink target does not match the manifest",
+                "real_directory": "a real directory shadows the expected symlink",
+                "real_file": "a real file shadows the expected symlink",
+                "extra": "item not declared in the manifest",
             }
             issues.append(
                 {
@@ -490,14 +535,14 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
 
 def render_doctor(report: dict[str, Any]) -> None:
     if not report["issues"]:
-        print("未发现问题。")
+        print("No issues found.")
         return
     for index, issue in enumerate(report["issues"], 1):
         endpoint = f" [{issue['client']}]" if issue["client"] else ""
-        print(f"{index}. {issue['skill']}{endpoint}：{issue['message']}")
-        print(f"   路径：{issue['path']}")
-        print(f"   建议：{issue['suggested_command']}")
-    print(f"\n共发现 {report['summary']['issues']} 个问题；doctor 未做任何修改。")
+        print(f"{index}. {issue['skill']}{endpoint}: {issue['message']}")
+        print(f"   path: {issue['path']}")
+        print(f"   fix: {issue['suggested_command']}")
+    print(f"\nFound {report['summary']['issues']} issue(s); doctor made no changes.")
 
 
 def parse_scope(value: str, origin: str) -> Any:
@@ -506,9 +551,9 @@ def parse_scope(value: str, origin: str) -> Any:
     requested = [item.strip() for item in value.split(",") if item.strip()]
     invalid = [item for item in requested if item not in CLIENTS]
     if invalid:
-        raise SkxError(f"--scope 含无效端名：{', '.join(invalid)}")
+        raise SkxError(f"--scope contains unknown client name(s): {', '.join(invalid)}")
     if origin not in requested:
-        raise SkxError(f"--scope 必须包含发起端 {origin}")
+        raise SkxError(f"--scope must include the origin client {origin}")
     return [client for client in CLIENTS if client in requested]
 
 
@@ -523,14 +568,14 @@ def unique_backup(path: Path) -> Path:
 
 
 def confirm(description: str, assume_yes: bool, dry_run: bool = False) -> bool:
-    print(f"将执行：{description}")
+    print(f"About to: {description}")
     if dry_run:
         return True
     if assume_yes:
-        print("  --yes：已确认")
+        print("  --yes: confirmed")
         return True
     try:
-        answer = input("确认执行？[y/N] ").strip().lower()
+        answer = input("Proceed? [y/N] ").strip().lower()
     except EOFError:
         answer = ""
     return answer in {"y", "yes"}
@@ -559,17 +604,17 @@ def rollback_adopt(
 def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
     source_path = Path(args.path).expanduser().absolute()
     if source_path.is_symlink() or not source_path.is_dir():
-        raise SkxError("adopt 只收编三端 skills 目录下现有的真实目录")
+        raise SkxError("adopt only accepts existing real directories inside a client skills directory")
     origin = next(
         (client for client in CLIENTS if source_path.parent == cfg[client].absolute()), None
     )
     if origin is None:
-        expected = "、".join(str(cfg[client]) for client in CLIENTS)
-        raise SkxError(f"路径必须直接位于三端 skills 目录之一：{expected}")
+        expected = ", ".join(str(cfg[client]) for client in CLIENTS)
+        raise SkxError(f"path must sit directly inside one of the client skills directories: {expected}")
     name = source_path.name
     manifest = read_manifest(cfg["manifest"], allow_missing=True)
     if any(item["name"] == name for item in manifest["skills"]):
-        raise SkxError(f"manifest 已存在 {name}；请用 sync 对账")
+        raise SkxError(f"manifest already declares {name}; use sync to reconcile")
     scope = parse_scope(args.scope, origin)
     selected = scope_clients(scope)
     target = (
@@ -578,7 +623,7 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         else cfg["agent_env"] / origin / "skills" / name
     )
     if path_exists(target):
-        raise SkxError(f"目标本体已存在，拒绝覆盖：{target}")
+        raise SkxError(f"target body already exists; refusing to overwrite: {target}")
 
     replacements: list[tuple[Path, Path]] = []
     for client in selected:
@@ -590,25 +635,25 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         replacements.append((destination, unique_backup(destination)))
 
     confirmations = [
-        f"移动本体 {source_path} → {target}",
-        f"在原位置创建软链 {source_path} → {target}",
+        f"move body {source_path} -> {target}",
+        f"create symlink {source_path} -> {target}",
     ]
     for path, backup in replacements:
-        confirmations.append(f"移动冲突项 {path} → {backup}")
-        confirmations.append(f"在腾空的位置创建软链 {path} → {target}")
-    print(f"收编计划：{name}（{origin} → {scope_label(scope)}，来源 {'vendor' if args.vendor else 'self'}）")
+        confirmations.append(f"move conflicting item {path} -> {backup}")
+        confirmations.append(f"create symlink in the vacated spot {path} -> {target}")
+    print(f"Adoption plan: {name} ({origin} -> {scope_label(scope)}, source {'vendor' if args.vendor else 'self'})")
     for description in confirmations:
         if not confirm(description, args.yes, args.dry_run):
-            print("已拒绝，未执行任何改动。")
+            print("Declined; no changes were made.")
             return 1
     for client in selected:
         destination = cfg[client] / name
         if destination == source_path or path_exists(destination):
             continue
-        print(f"将执行：创建软链 {destination} → {target}")
-    print(f"将执行：更新 manifest {cfg['manifest']}")
+        print(f"About to: create symlink {destination} -> {target}")
+    print(f"About to: update manifest {cfg['manifest']}")
     if args.dry_run:
-        print("dry-run 完成：未做任何修改。")
+        print("dry-run complete: no changes made.")
         return 0
 
     created: list[Path] = []
@@ -643,8 +688,8 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         write_manifest(cfg["manifest"], manifest)
     except Exception as exc:
         rollback_adopt(created, backups_done, moved)
-        raise SkxError(f"收编失败，已尽力回滚：{exc}") from exc
-    print(f"收编完成：{name}")
+        raise SkxError(f"adoption failed; rolled back as far as possible: {exc}") from exc
+    print(f"adopted: {name}")
     return 0
 
 
@@ -658,20 +703,20 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
             actual_clients = [
                 client for client in CLIENTS if row["clients"][client]["state"] == "extra"
             ]
-            unresolved.append(f"{row['name']}：manifest 外多余项（{','.join(actual_clients)}）")
+            unresolved.append(f"{row['name']}: extra item(s) outside the manifest ({','.join(actual_clients)})")
             continue
         if row["source"] == "plugin":
             if row["clients"]["claude"]["state"] == "plugin_missing":
-                unresolved.append(f"{row['name']}：插件本体缺失，需由 Claude 插件系统重装")
+                unresolved.append(f"{row['name']}: plugin body missing; reinstall via the Claude plugin system")
             continue
         body = Path(row["body"])
         for client in CLIENTS:
             if row["clients"][client]["state"] == "extra":
                 unresolved.append(
-                    f"{row['name']}：{client} 存在作用域外多余项 {row['clients'][client]['path']}"
+                    f"{row['name']}: {client} has an out-of-scope extra item {row['clients'][client]['path']}"
                 )
         if not body.exists():
-            unresolved.append(f"{row['name']}：本体不存在 {body}")
+            unresolved.append(f"{row['name']}: body does not exist {body}")
             continue
         for client in scope_clients(row["scope"]):
             status = row["clients"][client]
@@ -694,26 +739,26 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
 
     for action in actions:
         if action["kind"] == "create":
-            print(f"将执行：创建软链 {action['path']} → {action['body']}")
+            print(f"About to: create symlink {action['path']} -> {action['body']}")
         else:
             description = (
-                f"移动偏差项 {action['path']} → {action['backup']}，"
-                f"再创建软链 → {action['body']}"
+                f"move drifted item {action['path']} -> {action['backup']}, "
+                f"then create symlink -> {action['body']}"
             )
             if not confirm(description, args.yes, args.dry_run):
-                print("已拒绝该项，继续检查其余项目。")
+                print("Declined this item; continuing with the rest.")
                 action["skip"] = True
     if args.dry_run:
         planned = sum(not action.get("skip") for action in actions)
-        print(f"dry-run 完成：计划改动 {planned} 处，实际零改动。")
+        print(f"dry-run complete: {planned} change(s) planned, none applied.")
         for item in unresolved:
-            print(f"偏差：{item}")
+            print(f"drift: {item}")
         return 0
 
     changed = 0
     for action in actions:
         if action.get("skip"):
-            unresolved.append(f"{action['path']}：用户拒绝替换")
+            unresolved.append(f"{action['path']}: user declined the replacement")
             continue
         destination = action["path"]
         try:
@@ -723,49 +768,49 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
             destination.symlink_to(action["body"], target_is_directory=True)
             changed += 1
         except OSError as exc:
-            unresolved.append(f"{destination}：执行失败：{exc}")
+            unresolved.append(f"{destination}: failed: {exc}")
             if action["kind"] == "replace" and path_exists(action["backup"]):
                 if destination.is_symlink():
                     destination.unlink()
                 if not path_exists(destination):
                     os.replace(action["backup"], destination)
     if changed == 0:
-        print("同步完成：零改动。")
+        print("sync complete: no changes.")
     else:
-        print(f"同步完成：改动 {changed} 处。")
+        print(f"sync complete: {changed} change{'s' if changed != 1 else ''} applied.")
     for item in unresolved:
-        print(f"偏差：{item}")
+        print(f"drift: {item}")
     return 1 if unresolved else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="skx", description="三端 LLM CLI skill 覆盖审计与同步工具")
+    parser = argparse.ArgumentParser(prog="skx", description="Audit and reconcile skills shared across Claude, Codex and Kimi")
     parser.add_argument("--version", action="version", version="skx 1.0.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = subparsers.add_parser("list", help="显示 skill 覆盖矩阵")
-    list_parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    list_parser = subparsers.add_parser("list", help="show the skill coverage matrix")
+    list_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
-    doctor_parser = subparsers.add_parser("doctor", help="只读诊断偏差")
-    doctor_parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    doctor_parser = subparsers.add_parser("doctor", help="read-only diagnosis of drift")
+    doctor_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
-    scan_parser = subparsers.add_parser("scan", help="扫描当前环境生成 manifest 草稿")
-    scan_parser.add_argument("--write", action="store_true", help="写入 manifest；否则打印到 stdout")
+    scan_parser = subparsers.add_parser("scan", help="scan the environment and draft a manifest")
+    scan_parser.add_argument("--write", action="store_true", help="write the manifest; otherwise print to stdout")
 
-    adopt_parser = subparsers.add_parser("adopt", help="把端内真实目录收编到共享库")
-    adopt_parser.add_argument("path", help="要收编的真实 skill 目录")
-    adopt_parser.add_argument("--vendor", action="store_true", help="归入 agent-env/vendor")
+    adopt_parser = subparsers.add_parser("adopt", help="adopt a real in-client directory into the shared library")
+    adopt_parser.add_argument("path", help="real skill directory to adopt")
+    adopt_parser.add_argument("--vendor", action="store_true", help="place under agent-env/vendor")
     adopt_parser.add_argument(
         "--scope",
         default="shared",
-        help="shared（默认）或逗号分隔端名，如 codex,kimi",
+        help="shared (default) or comma-separated clients, e.g. codex,kimi",
     )
-    adopt_parser.add_argument("--dry-run", action="store_true", help="只打印计划")
-    adopt_parser.add_argument("--yes", action="store_true", help="自动确认（主要供测试/自动化）")
+    adopt_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
+    adopt_parser.add_argument("--yes", action="store_true", help="auto-confirm (mainly for tests/automation)")
 
-    sync_parser = subparsers.add_parser("sync", help="按 manifest 幂等补链和对账")
-    sync_parser.add_argument("--dry-run", action="store_true", help="只打印计划")
-    sync_parser.add_argument("--yes", action="store_true", help="自动确认偏差项替换")
+    sync_parser = subparsers.add_parser("sync", help="idempotently create links and reconcile against the manifest")
+    sync_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
+    sync_parser.add_argument("--yes", action="store_true", help="auto-confirm replacement of drifted items")
     return parser
 
 
@@ -778,7 +823,7 @@ def main(argv: list[str] | None = None) -> int:
             draft = scan_environment(cfg)
             if args.write:
                 write_manifest(cfg["manifest"], draft)
-                print(f"已写入 manifest 草稿：{cfg['manifest']}（{len(draft['skills'])} 个条目）")
+                print(f"wrote manifest draft: {cfg['manifest']} ({len(draft['skills'])} entries)")
             else:
                 json.dump(draft, sys.stdout, ensure_ascii=False, indent=2)
                 print()
@@ -803,13 +848,13 @@ def main(argv: list[str] | None = None) -> int:
             return command_adopt(args, cfg)
         if args.command == "sync":
             return command_sync(args, cfg)
-        parser.error("未知命令")
+        parser.error("unknown command")
     except SkxError as exc:
         if getattr(args, "json", False):
             json.dump({"error": str(exc)}, sys.stdout, ensure_ascii=False)
             print()
         else:
-            print(f"错误：{exc}", file=sys.stderr)
+            print(f"error: {exc}", file=sys.stderr)
         return 2
     return 2
 

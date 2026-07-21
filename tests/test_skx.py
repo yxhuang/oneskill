@@ -150,7 +150,7 @@ class SkxIntegrationTest(unittest.TestCase):
         (source / "SKILL.md").write_text("# keep\n", encoding="utf-8")
         result = self.run_skx("adopt", str(source), input_text="y\nn\n")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("未执行任何改动", result.stdout)
+        self.assertIn("no changes were made", result.stdout)
         self.assertTrue(source.is_dir())
         self.assertFalse(source.is_symlink())
         self.assertFalse((self.agent / "claude" / "skills" / "refuse").exists())
@@ -164,10 +164,10 @@ class SkxIntegrationTest(unittest.TestCase):
         )
         first = self.run_skx("sync", "--yes")
         self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
-        self.assertIn("改动 2 处", first.stdout)
+        self.assertIn("2 changes applied", first.stdout)
         second = self.run_skx("sync", "--yes")
         self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
-        self.assertIn("零改动", second.stdout)
+        self.assertIn("no changes", second.stdout)
 
     def test_sync_backs_up_real_directory_after_confirmation(self) -> None:
         body = self.body("vendor/conflict")
@@ -203,11 +203,41 @@ class SkxIntegrationTest(unittest.TestCase):
         manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
         entry = next(item for item in manifest["skills"] if item["name"] == "kimi-only")
         self.assertEqual(entry["scope"], ["kimi"])
-        self.assertIn("待人工确认", entry["review"])
+        self.assertIn("needs review", entry["review"])
         doctor = self.run_skx("doctor", "--json")
         self.assertEqual(doctor.returncode, 1)
         issues = json.loads(doctor.stdout)["issues"]
         self.assertTrue(any(issue["type"] == "scope_review" for issue in issues))
+
+    def test_list_groups_shared_and_attention_sections(self) -> None:
+        self.build_audit_fixture()
+        result = self.run_skx("list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn("SHARED (all three clients)", out)
+        self.assertIn("NEEDS ATTENTION", out)
+        shared_pos = out.index("SHARED (all three clients)")
+        attention_pos = out.index("NEEDS ATTENTION")
+        self.assertLess(shared_pos, attention_pos)
+        shared_section = out[shared_pos:attention_pos]
+        attention_section = out[attention_pos:]
+        self.assertIn("healthy", shared_section)
+        self.assertNotIn("shadow", shared_section)
+        self.assertIn("shadow", attention_section)
+        self.assertIn("broken", attention_section)
+
+    def test_list_hides_attention_section_when_clean(self) -> None:
+        body = self.body("claude/skills/tidy")
+        for client in CLIENT_PATHS:
+            self.link(client, "tidy", body)
+        self.write_manifest(
+            [{"name": "tidy", "source": "self", "body": str(body), "scope": "shared"}]
+        )
+        result = self.run_skx("list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHARED (all three clients)", result.stdout)
+        self.assertNotIn("NEEDS ATTENTION", result.stdout)
+        self.assertIn("0 issues", result.stdout)
 
 
 if __name__ == "__main__":
