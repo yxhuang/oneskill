@@ -1,137 +1,135 @@
 # skx
 
-`skx` 管理 Claude Code、Codex CLI、Kimi CLI 三端的 skill 软链接。它把
-`agent-env` 中的自制/第三方本体、外部安装器管理的本体和 Claude 插件放进同一张覆盖
-矩阵，帮助发现升级或手工安装造成的漂移。
+**One skill library. Every AI coding CLI.**
 
-项目刻意保持简单：一个 Python 3 文件，只用标准库，不安装依赖。`list` 和 `doctor`
-只读；`adopt`、`sync` 遇到移动或替换会先展示计划并要求确认。
+Claude Code, Codex CLI, and Kimi CLI can all load *skills* — folders containing a `SKILL.md`
+that teach the agent how to do something specific. The problem: each client reads from its own
+directory. Write a good skill once and you end up copying it three times, then watching the
+copies quietly drift apart until you can't remember which one you actually fixed.
 
-## 安装
+`skx` keeps one canonical copy of every skill and symlinks it into every client. A single
+command shows you what's shared, what's client-specific, and what's broken.
 
-仓库内直接运行：
+```
+$ skx list
 
-```bash
-/home/you/oneskill/bin/skx --version
+skill                  source    scope        claude      codex     kimi
+─────────────────────  ────────  ───────────  ──────────  ────────  ────────
+
+SHARED (all three clients)
+──────────────────────────────────────────────────────────────────────────
+pdf-editing            self      shared       ✓ linked    ✓ linked  ✓ linked
+refine-prompt          self      shared       ✓ linked    ✓ linked  ✓ linked
+stock-data             vendor    shared       ✓ linked    ✓ linked  ✓ linked
+
+CLIENT-SPECIFIC
+──────────────────────────────────────────────────────────────────────────
+superpowers            plugin    claude-only  ✓ plugin    —         —
+mail-organizer         self      codex-only   —           ✓ linked  —
+
+NEEDS ATTENTION
+──────────────────────────────────────────────────────────────────────────
+officecli              external  shared       ! real dir  ✓ linked  ✓ linked
+
+42 skills · 33 shared across all clients · 1 issue
 ```
 
-也可以把入口软链到已有的 `PATH` 目录：
+That last row is the whole point. A client upgrade replaced a symlink with a real directory,
+so Claude is now running a private copy that no longer tracks the library. You'd never notice
+by eye. `skx doctor` tells you exactly how to fix it.
+
+## Why this happens
+
+Symlink farms rot. Three things break them, over and over:
+
+- **Client upgrades** overwrite symlinks with real files, silently forking your config.
+- **New skills** get created in whichever client you happened to be using, and stay there.
+- **Uninstalls** leave dangling links pointing at directories that no longer exist.
+
+None of this surfaces as an error. Your agent just quietly stops seeing the skill you wrote,
+or sees a stale copy of it.
+
+## Install
 
 ```bash
-ln -s /home/you/oneskill/bin/skx ~/.local/bin/skx
-```
+git clone https://github.com/yxhuang/skx.git
+cd skx
+ln -s "$PWD/bin/skx" ~/.local/bin/skx    # anywhere on your PATH
 
-不要复制脚本；默认 manifest 路径按脚本真实位置定位，软链安装仍会读取本仓库的
-`skills.json`。
-
-## 常用命令
-
-先扫描现状并生成 manifest 草稿：
-
-```bash
-skx scan --write
-```
-
-只在单端出现的 skill 会保留单端作用域，并带上
-`待人工确认是否为有意的单端专属`，不会自动认定为 shared。扫描还会读取 Claude 的
-`~/.claude/plugins/installed_plugins.json`，把已安装插件登记为 `plugin`、
-`claude-only`；插件由 Claude 自己管理，`skx sync` 不碰插件缓存。
-
-查看覆盖矩阵：
-
-```bash
+skx init          # pick where your skill library lives
+skx scan --write  # build a manifest from what's already installed
 skx list
-skx list --json
 ```
 
-状态分为软链健康、缺失和异常。异常包括断链/孤儿链、软链目标错误、真实目录或文件
-遮蔽、多余项。JSON 输出只含一个合法 JSON 值，可直接作为 GUI 数据源。
+Requires Python 3.9+. No dependencies, no build step — it's a single file.
 
-只读诊断：
+## Commands
+
+| Command | What it does |
+|---|---|
+| `skx list` | Coverage matrix across all clients. Add `--json` for machine output. |
+| `skx doctor` | Find drift: broken links, real directories shadowing links, manifest mismatches. Read-only — it prints fix commands, it never runs them. |
+| `skx adopt <path>` | Take a skill that exists in one client and share it with the rest. |
+| `skx sync` | Reconcile reality against the manifest. Idempotent — a second run is always a no-op. |
+| `skx scan --write` | Generate a manifest draft from your current setup. |
+| `skx init` | First-time configuration. |
+
+## How it works
+
+One directory holds every skill body. Each client's skills directory gets symlinks pointing
+into it. A manifest records what *should* exist, so drift becomes a diff rather than a guess.
+
+```
+  ~/skill-library/pdf-editing/SKILL.md   ← the only real copy
+        ↑              ↑            ↑
+  ~/.claude/     ~/.codex/    ~/.kimi-code/
+    skills/        skills/       skills/
+```
+
+`adopt` is the inverse of the problem: point it at a skill living inside one client, and it
+moves the body into the library, replaces the original with a symlink, and links it into the
+others.
+
+## It never deletes anything
+
+Managing symlink farms means moving real directories around, so `skx` is built to be
+un-scary:
+
+- **Every destructive step asks first**, one at a time, showing the exact paths involved.
+- **Conflicts are renamed, never removed.** Anything in the way becomes
+  `<name>.skx-backup-<timestamp>`. There is no `rmtree` anywhere in the codebase.
+- **`--dry-run` on `adopt` and `sync`** prints the full plan and changes nothing.
+- **Failed operations roll back** — a half-finished `adopt` restores what it moved.
+- **`list` and `doctor` are strictly read-only**, safe to run anywhere, any time.
+
+The design rule is that a bad day should cost you a rename, never a file.
+
+## Supported clients
+
+Claude Code (`~/.claude/skills`), Codex CLI (`~/.codex/skills`), and Kimi CLI
+(`~/.kimi-code/skills`) — they share the same `SKILL.md` format, which is what makes this
+possible at all.
+
+Claude Code *plugin* skills are deliberately not shared: they live in versioned cache paths
+that break on every plugin update, and their content is bound to Claude-specific tooling.
+`skx` reports them as `claude-only` rather than pretending otherwise.
+
+Adding another client is a few lines — client paths are declared in one place near the top of
+`bin/skx`.
+
+## Status
+
+v1, and honest about it: this scratches a real itch on the author's machine and the safety
+properties are covered by tests, but it has run on exactly one setup so far. Bug reports from
+a second machine would be genuinely useful.
 
 ```bash
-skx doctor
-skx doctor --json
+python3 -m unittest discover -s tests
 ```
 
-每个问题都附一条供人工复制的建议命令，`doctor` 自己不执行修复。有问题时退出码为
-1，无问题时为 0。扫描草稿里尚未人工确认的单端作用域也会列为 `scope_review`，避免
-初次扫描把孤立安装静默当成正常状态。
+Roadmap — a GUI over `skx list --json`, and support for more clients. The JSON output is
+stable enough to build against today.
 
-收编某端新建的真实 skill 目录：
+## License
 
-```bash
-skx adopt ~/.codex/skills/my-skill
-skx adopt ~/.kimi-code/skills/vendor-skill --vendor
-skx adopt ~/.codex/skills/codex-only --scope codex
-skx adopt ~/.codex/skills/two-clients --scope codex,kimi
-skx adopt ~/.codex/skills/my-skill --dry-run
-```
-
-默认作用域是 `shared`。普通收编把本体放到
-`agent-env/<发起端>/skills/<name>`；`--vendor` 放到 `agent-env/vendor/<name>`。
-工具会逐项打印移动/替换计划并从 stdin 读取 `y/N`。`--yes` 用于明确授权的自动化和
-集成测试，不建议日常盲用。冲突项不会删除，而会改名成带时间戳的
-`.skx-backup-*` 后再补链。
-
-按 manifest 对账：
-
-```bash
-skx sync --dry-run
-skx sync
-```
-
-缺失且本体存在的软链直接补齐；断链、错误目标、真实文件/目录等替换操作逐项确认。
-无法自动解决的本体缺失、插件缺失和 manifest 外多余项只报告。命令是幂等的：完成
-一次同步后再次运行会输出 `同步完成：零改动。`
-
-## manifest 格式
-
-默认清单是仓库根目录的 `skills.json`，格式版本为 1。条目按名字排序，便于人工审查
-和 git diff：
-
-```json
-{
-  "version": 1,
-  "skills": [
-    {
-      "name": "refine-prompt",
-      "source": "self",
-      "body": "/home/you/skill-library/claude/skills/refine-prompt",
-      "scope": "shared"
-    },
-    {
-      "name": "mail-attachment-organizer",
-      "source": "self",
-      "body": "/home/you/skill-library/codex/skills/mail-attachment-organizer",
-      "scope": ["codex"],
-      "review": "待人工确认是否为有意的单端专属"
-    }
-  ]
-}
-```
-
-- `source`：`self`、`vendor`、`external`、`plugin` 之一。
-- `body`：skill 本体的绝对路径；external 一般位于 `~/.agents/skills/`。
-- `scope`：`shared` 或端名数组，端名只能是 `claude`、`codex`、`kimi`。
-- `review`：扫描草稿的提醒字段，人工确认后可保留或删除。
-- `plugin_id`：插件条目可带的 Claude 插件完整标识。
-
-## 测试路径重定向
-
-以下环境变量把所有可变路径导向测试沙箱：
-
-| 变量 | 默认值 | 用途 |
-|---|---|---|
-| `SKX_HOME` | `$HOME` | 三端目录的家目录基准，同时决定 `.agents` 和 Claude 插件登记路径 |
-| `SKX_AGENT_ENV` | `/home/you/skill-library` | skill 库根目录 |
-| `SKX_MANIFEST` | 仓库根目录 `skills.json` | manifest 文件路径 |
-
-集成测试只在 `/tmp` 下创建假 home 和假 agent-env，不接触真实配置：
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-测试覆盖三端健康、单端缺失、真实目录遮蔽、断链/孤儿链、doctor 建议、adopt 全流程、
-dry-run、sync 幂等和 JSON 纯净输出。
+MIT

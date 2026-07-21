@@ -26,23 +26,67 @@ CLIENT_DIRS = {
 SOURCES = {"self", "vendor", "external", "plugin"}
 MANIFEST_VERSION = 1
 PENDING_REVIEW = "needs review: single-client skill, confirm if intentional"
+UNMANAGED_REVIEW = "not in the shared library yet; run `skx adopt` to bring it under management"
+CONFIG_DIR_PARTS = (".config", "skx")
+DEFAULT_LIBRARY_PARTS = (".skx", "library")
 
 
 class SkxError(Exception):
     pass
 
 
+def config_file_path(home: Path) -> Path:
+    return home.joinpath(*CONFIG_DIR_PARTS, "config.json")
+
+
+def read_config_file(home: Path) -> dict[str, Any]:
+    path = config_file_path(home)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SkxError(f"cannot read config file {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SkxError(f"config file {path} must contain a JSON object")
+    return data
+
+
+def config_string(file_cfg: dict[str, Any], key: str, home: Path) -> str | None:
+    value = file_cfg.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise SkxError(f"config file {config_file_path(home)}: {key!r} must be a non-empty path string")
+    return value
+
+
 def config() -> dict[str, Path]:
     home = Path(os.environ.get("SKX_HOME", str(Path.home()))).expanduser().absolute()
-    agent_env = Path(
-        os.environ.get("SKX_AGENT_ENV", "/home/you/skill-library")
-    ).expanduser().absolute()
-    default_manifest = Path(__file__).resolve().parent.parent / "skills.json"
-    manifest = Path(os.environ.get("SKX_MANIFEST", str(default_manifest))).expanduser().absolute()
-    result = {"home": home, "agent_env": agent_env, "manifest": manifest}
+    file_cfg = read_config_file(home)
+    library = os.environ.get("SKX_AGENT_ENV") or config_string(file_cfg, "library", home)
+    if not library:
+        library = str(home.joinpath(*DEFAULT_LIBRARY_PARTS))
+    manifest = os.environ.get("SKX_MANIFEST") or config_string(file_cfg, "manifest", home)
+    if not manifest:
+        manifest = str(home.joinpath(*CONFIG_DIR_PARTS, "skills.json"))
+    result = {
+        "home": home,
+        "agent_env": Path(library).expanduser().absolute(),
+        "manifest": Path(manifest).expanduser().absolute(),
+    }
     for client, parts in CLIENT_DIRS.items():
         result[client] = home.joinpath(*parts)
     return result
+
+
+def require_library(cfg: dict[str, Path]) -> None:
+    library = cfg["agent_env"]
+    if not library.is_dir():
+        raise SkxError(
+            f"skill library not found: {library}\n"
+            "run `skx init` to configure skx (or set SKX_AGENT_ENV to an existing directory)"
+        )
 
 
 def path_exists(path: Path) -> bool:
@@ -99,8 +143,11 @@ def validate_entry(entry: Any) -> dict[str, Any]:
         raise SkxError(f"invalid skill name: {name!r}")
     if entry["source"] not in SOURCES:
         raise SkxError(f"{name} has an invalid source: {entry['source']!r}")
-    if not isinstance(entry["body"], str) or not entry["body"]:
-        raise SkxError(f"{name}: body must be a path string")
+    body = entry["body"]
+    if body is not None and (not isinstance(body, str) or not body):
+        raise SkxError(f"{name}: body must be a path string or null")
+    if entry["source"] == "plugin" and body is None:
+        raise SkxError(f"plugin {name} must declare a body path")
     scope_clients(entry["scope"])
     if entry["source"] == "plugin" and scope_clients(entry["scope"]) != ("claude",):
         raise SkxError(f"plugin {name} must be scoped to claude only")
@@ -223,17 +270,24 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
                 targets.append(link_target(path))
         if targets:
             body_text, _ = Counter(str(item) for item in targets).most_common(1)[0]
-            body = Path(body_text)
+            body: Path | None = Path(body_text)
         else:
-            body = per_client[present[0]][name].absolute()
+            # no symlink points anywhere: the only copy is the real directory
+            # itself, so there is no shared body yet. Leave body null rather
+            # than pointing it at the client's own path (which would make
+            # every later repair suggestion self-referential).
+            body = None
         scope: Any = "shared" if len(present) == len(CLIENTS) else present
+        sample = per_client[present[0]][name].absolute()
         entry: dict[str, Any] = {
             "name": name,
-            "source": infer_source(body, cfg),
-            "body": str(body),
+            "source": infer_source(body if body is not None else sample, cfg),
+            "body": str(body) if body is not None else None,
             "scope": scope,
         }
-        if len(present) == 1:
+        if body is None:
+            entry["review"] = UNMANAGED_REVIEW
+        elif len(present) == 1:
             entry["review"] = PENDING_REVIEW
         skills.append(entry)
     occupied = {item["name"] for item in skills}
@@ -262,7 +316,15 @@ def inspect_path(path: Path, body: Path, expected: bool) -> dict[str, Any]:
             base.update(state="healthy", detail="symlink healthy")
         return base
     if path.is_dir():
-        base.update(state="real_directory", detail="real directory shadows the link")
+        if normalized(path) == normalized(body):
+            # the inferred body is this directory itself: there is no shared
+            # body elsewhere, so this is an unmanaged skill, not a shadow
+            base.update(state="unmanaged", detail="not in the shared library yet")
+        else:
+            base.update(state="real_directory", detail="real directory shadows the link")
+        return base
+    if normalized(path) == normalized(body):
+        base.update(state="unmanaged", detail="not in the shared library yet")
     else:
         base.update(state="real_file", detail="real file shadows the link")
     return base
@@ -277,11 +339,12 @@ def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str,
         if name in declared:
             entry = declared[name]
             source = entry["source"]
-            body = Path(entry["body"]).expanduser().absolute()
+            raw_body = entry["body"]
+            body = Path(raw_body).expanduser().absolute() if raw_body is not None else None
             expected_clients = set(scope_clients(entry["scope"]))
             clients: dict[str, dict[str, Any]] = {}
             if source == "plugin":
-                plugin_ok = body.exists()
+                plugin_ok = body is not None and body.exists()
                 clients["claude"] = {
                     "path": str(body),
                     "expected": True,
@@ -297,7 +360,13 @@ def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str,
                     }
             else:
                 clients = {
-                    client: inspect_path(cfg[client] / name, body, client in expected_clients)
+                    client: inspect_path(
+                        cfg[client] / name,
+                        # with no declared body, compare each client path
+                        # against itself so real directories read as unmanaged
+                        body if body is not None else cfg[client] / name,
+                        client in expected_clients,
+                    )
                     for client in CLIENTS
                 }
             rows.append(
@@ -365,6 +434,7 @@ STATE_MARKS = {
     "wrong_target": "! mismatch",
     "real_directory": "! real dir",
     "real_file": "! real file",
+    "unmanaged": "○ unmanaged",
     "extra": "! extra",
 }
 
@@ -454,11 +524,21 @@ def shell_join(*parts: Path | str) -> str:
 
 def repair_for(row: dict[str, Any], client: str, status: dict[str, Any]) -> str:
     path = Path(status["path"])
-    body = Path(row["body"])
+    raw_body = row.get("body")
+    body = Path(raw_body) if raw_body is not None else None
     state = status["state"]
+    if state == "unmanaged":
+        return shell_join("skx", "adopt", path)
     if state in {"missing"}:
+        if body is None:
+            return "no shared body yet; adopt an existing copy with `skx adopt` first"
+        if normalized(body) == normalized(path):
+            return shell_join("skx", "adopt", path)
         return shell_join("ln", "-s", body, path)
     if state in {"real_directory", "real_file", "wrong_target", "orphan_link"}:
+        if body is None or normalized(body) == normalized(path):
+            # never emit a command whose source and target are the same path
+            return shell_join("skx", "adopt", path)
         backup = Path(f"{path}.skx-backup")
         if not body.exists():
             return f"restore the body {shlex.quote(str(body))} first, then rebuild {shlex.quote(str(path))}"
@@ -475,7 +555,7 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     body_reported: set[str] = set()
     for row in inventory["skills"]:
-        if row["declared"] and row.get("review"):
+        if row["declared"] and row.get("review") and row["body"] is not None:
             issues.append(
                 {
                     "type": "scope_review",
@@ -488,7 +568,12 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
                     ),
                 }
             )
-        if row["declared"] and row["source"] != "plugin" and not Path(row["body"]).exists():
+        if (
+            row["declared"]
+            and row["source"] != "plugin"
+            and row["body"] is not None
+            and not Path(row["body"]).exists()
+        ):
             if row["name"] not in body_reported:
                 issues.append(
                     {
@@ -513,6 +598,7 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
                 "wrong_target": "symlink target does not match the manifest",
                 "real_directory": "a real directory shadows the expected symlink",
                 "real_file": "a real file shadows the expected symlink",
+                "unmanaged": "not in the shared library yet",
                 "extra": "item not declared in the manifest",
             }
             issues.append(
@@ -601,6 +687,61 @@ def rollback_adopt(
             shutil.move(str(target), str(source))
 
 
+def command_init(args: argparse.Namespace) -> int:
+    home = Path(os.environ.get("SKX_HOME", str(Path.home()))).expanduser().absolute()
+    config_path = config_file_path(home)
+    default_library = home.joinpath(*DEFAULT_LIBRARY_PARTS)
+    default_manifest = home.joinpath(*CONFIG_DIR_PARTS, "skills.json")
+
+    if config_path.is_file():
+        print(f"config file already exists: {config_path}")
+        try:
+            existing = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict):
+            print(json.dumps(existing, ensure_ascii=False, indent=2))
+        else:
+            print("(existing content is not a valid JSON object)")
+        overwrite = args.yes
+        if not overwrite:
+            try:
+                answer = input("Overwrite? [y/N] ").strip().lower()
+            except EOFError:
+                answer = ""
+            overwrite = answer in {"y", "yes"}
+        if not overwrite:
+            print("Declined; existing configuration left unchanged.")
+            return 1
+
+    library = default_library
+    if not args.yes:
+        try:
+            answer = input(f"Skill library directory [{default_library}]: ").strip()
+        except EOFError:
+            answer = ""
+        if answer:
+            library = Path(answer).expanduser().absolute()
+
+    try:
+        existed = library.is_dir()
+        library.mkdir(parents=True, exist_ok=True)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"library": str(library), "manifest": str(default_manifest)}
+        config_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        raise SkxError(f"init failed: {exc}") from exc
+    if existed:
+        print(f"library directory already exists: {library}")
+    else:
+        print(f"created library directory: {library}")
+    print(f"wrote config: {config_path}")
+    print("next step: run `skx scan --write` to generate the manifest")
+    return 0
+
+
 def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
     source_path = Path(args.path).expanduser().absolute()
     if source_path.is_symlink() or not source_path.is_dir():
@@ -613,7 +754,8 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         raise SkxError(f"path must sit directly inside one of the client skills directories: {expected}")
     name = source_path.name
     manifest = read_manifest(cfg["manifest"], allow_missing=True)
-    if any(item["name"] == name for item in manifest["skills"]):
+    existing = next((item for item in manifest["skills"] if item["name"] == name), None)
+    if existing is not None and existing.get("body") is not None:
         raise SkxError(f"manifest already declares {name}; use sync to reconcile")
     scope = parse_scope(args.scope, origin)
     selected = scope_clients(scope)
@@ -678,13 +820,22 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.symlink_to(target, target_is_directory=True)
             created.append(destination)
-        entry: dict[str, Any] = {
-            "name": name,
-            "source": "vendor" if args.vendor else "self",
-            "body": str(target),
-            "scope": scope,
-        }
-        manifest["skills"].append(entry)
+        if existing is not None:
+            # scan wrote this entry with a null body (unmanaged); complete it
+            existing.pop("review", None)
+            existing.update(
+                source="vendor" if args.vendor else "self",
+                body=str(target),
+                scope=scope,
+            )
+        else:
+            entry: dict[str, Any] = {
+                "name": name,
+                "source": "vendor" if args.vendor else "self",
+                "body": str(target),
+                "scope": scope,
+            }
+            manifest["skills"].append(entry)
         write_manifest(cfg["manifest"], manifest)
     except Exception as exc:
         rollback_adopt(created, backups_done, moved)
@@ -709,11 +860,22 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
             if row["clients"]["claude"]["state"] == "plugin_missing":
                 unresolved.append(f"{row['name']}: plugin body missing; reinstall via the Claude plugin system")
             continue
+        if row["body"] is None:
+            holders = [
+                client for client in CLIENTS if row["clients"][client]["state"] == "unmanaged"
+            ]
+            hint = f"adopt {row['clients'][holders[0]]['path']}" if holders else "adopt an existing copy"
+            unresolved.append(f"{row['name']}: not in the shared library yet; run `skx {hint}` first")
+            continue
         body = Path(row["body"])
         for client in CLIENTS:
             if row["clients"][client]["state"] == "extra":
                 unresolved.append(
                     f"{row['name']}: {client} has an out-of-scope extra item {row['clients'][client]['path']}"
+                )
+            elif row["clients"][client]["state"] == "unmanaged":
+                unresolved.append(
+                    f"{row['name']}: {client} has an unmanaged real directory {row['clients'][client]['path']}; run `skx adopt`"
                 )
         if not body.exists():
             unresolved.append(f"{row['name']}: body does not exist {body}")
@@ -724,6 +886,13 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
             destination = Path(status["path"])
             if state == "healthy":
                 continue
+            if state in {"missing", "real_directory", "real_file", "wrong_target", "orphan_link"}:
+                if normalized(body) == normalized(destination):
+                    # never create a symlink whose target is its own path
+                    unresolved.append(
+                        f"{row['name']}: {client}: refusing self-referential link at {destination}; run `skx adopt`"
+                    )
+                    continue
             if state == "missing":
                 actions.append({"kind": "create", "path": destination, "body": body})
             elif state in {"real_directory", "real_file", "wrong_target", "orphan_link"}:
@@ -788,6 +957,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="skx 1.0.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    init_parser = subparsers.add_parser("init", help="interactive first-time setup; writes ~/.config/skx/config.json")
+    init_parser.add_argument("--yes", action="store_true", help="accept all defaults without prompting")
+
     list_parser = subparsers.add_parser("list", help="show the skill coverage matrix")
     list_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
@@ -817,8 +989,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    cfg = config()
     try:
+        if args.command == "init":
+            return command_init(args)
+        cfg = config()
+        if args.command in {"list", "doctor", "scan", "sync"}:
+            require_library(cfg)
         if args.command == "scan":
             draft = scan_environment(cfg)
             if args.write:

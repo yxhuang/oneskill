@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "pdf-editing",
+      "source": "self",
+      "body": "/home/you/skill-library/claude/skills/pdf-editing",
+      "scope": "shared"
+    },
+    {
+      "name": "vendor-tool",
+      "source": "vendor",
+      "body": "/home/you/skill-library/vendor/vendor-tool",
+      "scope": [
+        "claude",
+        "kimi"
+      ]
+    },
+    {
+      "name": "kimi-only-helper",
+      "source": "external",
+      "body": "/home/you/.agents/skills/kimi-only-helper",
+      "scope": [
+        "kimi"
+      ],
+      "review": "needs review: single-client skill, confirm if intentional"
+    }
+  ]
+}

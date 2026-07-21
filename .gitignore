@@ -1,3 +1,6 @@
 __pycache__/
 *.py[cod]
 
+# machine-local manifest; see skills.example.json
+/skills.json
+
