@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""skx v1: audit and reconcile skills shared by Claude, Codex and Kimi."""
+"""oneskill v1: audit and reconcile skills shared by Claude, Codex and Kimi."""
 
 from __future__ import annotations
 
@@ -26,12 +26,12 @@ CLIENT_DIRS = {
 SOURCES = {"self", "vendor", "external", "plugin"}
 MANIFEST_VERSION = 1
 PENDING_REVIEW = "needs review: single-client skill, confirm if intentional"
-UNMANAGED_REVIEW = "not in the shared library yet; run `skx adopt` to bring it under management"
-CONFIG_DIR_PARTS = (".config", "skx")
-DEFAULT_LIBRARY_PARTS = (".skx", "library")
+UNMANAGED_REVIEW = "not in the shared library yet; run `osk adopt` to bring it under management"
+CONFIG_DIR_PARTS = (".config", "oneskill")
+DEFAULT_LIBRARY_PARTS = (".oneskill", "library")
 
 
-class SkxError(Exception):
+class OneskillError(Exception):
     pass
 
 
@@ -46,9 +46,9 @@ def read_config_file(home: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SkxError(f"cannot read config file {path}: {exc}") from exc
+        raise OneskillError(f"cannot read config file {path}: {exc}") from exc
     if not isinstance(data, dict):
-        raise SkxError(f"config file {path} must contain a JSON object")
+        raise OneskillError(f"config file {path} must contain a JSON object")
     return data
 
 
@@ -57,22 +57,22 @@ def config_string(file_cfg: dict[str, Any], key: str, home: Path) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value:
-        raise SkxError(f"config file {config_file_path(home)}: {key!r} must be a non-empty path string")
+        raise OneskillError(f"config file {config_file_path(home)}: {key!r} must be a non-empty path string")
     return value
 
 
 def config() -> dict[str, Path]:
-    home = Path(os.environ.get("SKX_HOME", str(Path.home()))).expanduser().absolute()
+    home = Path(os.environ.get("ONESKILL_HOME", str(Path.home()))).expanduser().absolute()
     file_cfg = read_config_file(home)
-    library = os.environ.get("SKX_AGENT_ENV") or config_string(file_cfg, "library", home)
+    library = os.environ.get("ONESKILL_LIBRARY") or config_string(file_cfg, "library", home)
     if not library:
         library = str(home.joinpath(*DEFAULT_LIBRARY_PARTS))
-    manifest = os.environ.get("SKX_MANIFEST") or config_string(file_cfg, "manifest", home)
+    manifest = os.environ.get("ONESKILL_MANIFEST") or config_string(file_cfg, "manifest", home)
     if not manifest:
         manifest = str(home.joinpath(*CONFIG_DIR_PARTS, "skills.json"))
     result = {
         "home": home,
-        "agent_env": Path(library).expanduser().absolute(),
+        "library": Path(library).expanduser().absolute(),
         "manifest": Path(manifest).expanduser().absolute(),
     }
     for client, parts in CLIENT_DIRS.items():
@@ -81,11 +81,11 @@ def config() -> dict[str, Path]:
 
 
 def require_library(cfg: dict[str, Path]) -> None:
-    library = cfg["agent_env"]
+    library = cfg["library"]
     if not library.is_dir():
-        raise SkxError(
+        raise OneskillError(
             f"skill library not found: {library}\n"
-            "run `skx init` to configure skx (or set SKX_AGENT_ENV to an existing directory)"
+            "run `osk init` to configure oneskill (or set ONESKILL_LIBRARY to an existing directory)"
         )
 
 
@@ -116,10 +116,10 @@ def scope_clients(scope: Any) -> tuple[str, ...]:
     if scope == "shared":
         return CLIENTS
     if not isinstance(scope, list) or not scope:
-        raise SkxError("scope must be 'shared' or a non-empty list of client names")
+        raise OneskillError("scope must be 'shared' or a non-empty list of client names")
     invalid = [item for item in scope if item not in CLIENTS]
     if invalid:
-        raise SkxError(f"scope contains unknown client name(s): {', '.join(map(str, invalid))}")
+        raise OneskillError(f"scope contains unknown client name(s): {', '.join(map(str, invalid))}")
     return tuple(client for client in CLIENTS if client in scope)
 
 
@@ -133,24 +133,24 @@ def scope_label(scope: Any) -> str:
 
 def validate_entry(entry: Any) -> dict[str, Any]:
     if not isinstance(entry, dict):
-        raise SkxError("each manifest skills entry must be an object")
+        raise OneskillError("each manifest skills entry must be an object")
     required = ("name", "source", "body", "scope")
     missing = [key for key in required if key not in entry]
     if missing:
-        raise SkxError(f"manifest entry is missing field(s): {', '.join(missing)}")
+        raise OneskillError(f"manifest entry is missing field(s): {', '.join(missing)}")
     name = entry["name"]
     if not isinstance(name, str) or not name or "/" in name or name in {".", ".."}:
-        raise SkxError(f"invalid skill name: {name!r}")
+        raise OneskillError(f"invalid skill name: {name!r}")
     if entry["source"] not in SOURCES:
-        raise SkxError(f"{name} has an invalid source: {entry['source']!r}")
+        raise OneskillError(f"{name} has an invalid source: {entry['source']!r}")
     body = entry["body"]
     if body is not None and (not isinstance(body, str) or not body):
-        raise SkxError(f"{name}: body must be a path string or null")
+        raise OneskillError(f"{name}: body must be a path string or null")
     if entry["source"] == "plugin" and body is None:
-        raise SkxError(f"plugin {name} must declare a body path")
+        raise OneskillError(f"plugin {name} must declare a body path")
     scope_clients(entry["scope"])
     if entry["source"] == "plugin" and scope_clients(entry["scope"]) != ("claude",):
-        raise SkxError(f"plugin {name} must be scoped to claude only")
+        raise OneskillError(f"plugin {name} must be scoped to claude only")
     return dict(entry)
 
 
@@ -158,20 +158,20 @@ def read_manifest(path: Path, allow_missing: bool = False) -> dict[str, Any]:
     if not path.exists():
         if allow_missing:
             return {"version": MANIFEST_VERSION, "skills": []}
-        raise SkxError(f"manifest not found: {path}; run `skx scan --write` first")
+        raise OneskillError(f"manifest not found: {path}; run `osk scan --write` first")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SkxError(f"cannot read manifest {path}: {exc}") from exc
+        raise OneskillError(f"cannot read manifest {path}: {exc}") from exc
     if not isinstance(data, dict) or data.get("version") != MANIFEST_VERSION:
-        raise SkxError(f"manifest version must be {MANIFEST_VERSION}")
+        raise OneskillError(f"manifest version must be {MANIFEST_VERSION}")
     if not isinstance(data.get("skills"), list):
-        raise SkxError("manifest is missing the skills array")
+        raise OneskillError("manifest is missing the skills array")
     entries = [validate_entry(item) for item in data["skills"]]
     names = [item["name"] for item in entries]
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
-        raise SkxError(f"duplicate skill name(s) in manifest: {', '.join(duplicates)}")
+        raise OneskillError(f"duplicate skill name(s) in manifest: {', '.join(duplicates)}")
     return {"version": MANIFEST_VERSION, "skills": entries}
 
 
@@ -195,9 +195,9 @@ def write_manifest(path: Path, data: dict[str, Any]) -> None:
 
 
 def infer_source(body: Path, cfg: dict[str, Path]) -> str:
-    if within(body, cfg["agent_env"] / "vendor"):
+    if within(body, cfg["library"] / "vendor"):
         return "vendor"
-    if within(body, cfg["agent_env"]):
+    if within(body, cfg["library"]):
         return "self"
     if within(body, cfg["home"] / ".agents" / "skills"):
         return "external"
@@ -216,7 +216,7 @@ def visible_entries(directory: Path) -> dict[str, Path]:
             if not item.name.startswith(".")
         }
     except OSError as exc:
-        raise SkxError(f"cannot scan {directory}: {exc}") from exc
+        raise OneskillError(f"cannot scan {directory}: {exc}") from exc
 
 
 def scan_plugins(cfg: dict[str, Path], occupied: set[str]) -> list[dict[str, Any]]:
@@ -528,18 +528,18 @@ def repair_for(row: dict[str, Any], client: str, status: dict[str, Any]) -> str:
     body = Path(raw_body) if raw_body is not None else None
     state = status["state"]
     if state == "unmanaged":
-        return shell_join("skx", "adopt", path)
+        return shell_join("osk", "adopt", path)
     if state in {"missing"}:
         if body is None:
-            return "no shared body yet; adopt an existing copy with `skx adopt` first"
+            return "no shared body yet; adopt an existing copy with `osk adopt` first"
         if normalized(body) == normalized(path):
-            return shell_join("skx", "adopt", path)
+            return shell_join("osk", "adopt", path)
         return shell_join("ln", "-s", body, path)
     if state in {"real_directory", "real_file", "wrong_target", "orphan_link"}:
         if body is None or normalized(body) == normalized(path):
             # never emit a command whose source and target are the same path
-            return shell_join("skx", "adopt", path)
-        backup = Path(f"{path}.skx-backup")
+            return shell_join("osk", "adopt", path)
+        backup = Path(f"{path}.oneskill-backup")
         if not body.exists():
             return f"restore the body {shlex.quote(str(body))} first, then rebuild {shlex.quote(str(path))}"
         return f"{shell_join('mv', path, backup)} && {shell_join('ln', '-s', body, path)}"
@@ -564,7 +564,7 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
                     "path": inventory["manifest"],
                     "message": str(row["review"]),
                     "suggested_command": (
-                        f"{shell_join('vi', inventory['manifest'])} && skx sync"
+                        f"{shell_join('vi', inventory['manifest'])} && osk sync"
                     ),
                 }
             )
@@ -637,18 +637,18 @@ def parse_scope(value: str, origin: str) -> Any:
     requested = [item.strip() for item in value.split(",") if item.strip()]
     invalid = [item for item in requested if item not in CLIENTS]
     if invalid:
-        raise SkxError(f"--scope contains unknown client name(s): {', '.join(invalid)}")
+        raise OneskillError(f"--scope contains unknown client name(s): {', '.join(invalid)}")
     if origin not in requested:
-        raise SkxError(f"--scope must include the origin client {origin}")
+        raise OneskillError(f"--scope must include the origin client {origin}")
     return [client for client in CLIENTS if client in requested]
 
 
 def unique_backup(path: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    candidate = Path(f"{path}.skx-backup-{stamp}")
+    candidate = Path(f"{path}.oneskill-backup-{stamp}")
     number = 2
     while path_exists(candidate):
-        candidate = Path(f"{path}.skx-backup-{stamp}-{number}")
+        candidate = Path(f"{path}.oneskill-backup-{stamp}-{number}")
         number += 1
     return candidate
 
@@ -688,7 +688,7 @@ def rollback_adopt(
 
 
 def command_init(args: argparse.Namespace) -> int:
-    home = Path(os.environ.get("SKX_HOME", str(Path.home()))).expanduser().absolute()
+    home = Path(os.environ.get("ONESKILL_HOME", str(Path.home()))).expanduser().absolute()
     config_path = config_file_path(home)
     default_library = home.joinpath(*DEFAULT_LIBRARY_PARTS)
     default_manifest = home.joinpath(*CONFIG_DIR_PARTS, "skills.json")
@@ -732,40 +732,40 @@ def command_init(args: argparse.Namespace) -> int:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
     except OSError as exc:
-        raise SkxError(f"init failed: {exc}") from exc
+        raise OneskillError(f"init failed: {exc}") from exc
     if existed:
         print(f"library directory already exists: {library}")
     else:
         print(f"created library directory: {library}")
     print(f"wrote config: {config_path}")
-    print("next step: run `skx scan --write` to generate the manifest")
+    print("next step: run `osk scan --write` to generate the manifest")
     return 0
 
 
 def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
     source_path = Path(args.path).expanduser().absolute()
     if source_path.is_symlink() or not source_path.is_dir():
-        raise SkxError("adopt only accepts existing real directories inside a client skills directory")
+        raise OneskillError("adopt only accepts existing real directories inside a client skills directory")
     origin = next(
         (client for client in CLIENTS if source_path.parent == cfg[client].absolute()), None
     )
     if origin is None:
         expected = ", ".join(str(cfg[client]) for client in CLIENTS)
-        raise SkxError(f"path must sit directly inside one of the client skills directories: {expected}")
+        raise OneskillError(f"path must sit directly inside one of the client skills directories: {expected}")
     name = source_path.name
     manifest = read_manifest(cfg["manifest"], allow_missing=True)
     existing = next((item for item in manifest["skills"] if item["name"] == name), None)
     if existing is not None and existing.get("body") is not None:
-        raise SkxError(f"manifest already declares {name}; use sync to reconcile")
+        raise OneskillError(f"manifest already declares {name}; use sync to reconcile")
     scope = parse_scope(args.scope, origin)
     selected = scope_clients(scope)
     target = (
-        cfg["agent_env"] / "vendor" / name
+        cfg["library"] / "vendor" / name
         if args.vendor
-        else cfg["agent_env"] / origin / "skills" / name
+        else cfg["library"] / origin / "skills" / name
     )
     if path_exists(target):
-        raise SkxError(f"target body already exists; refusing to overwrite: {target}")
+        raise OneskillError(f"target body already exists; refusing to overwrite: {target}")
 
     replacements: list[tuple[Path, Path]] = []
     for client in selected:
@@ -839,7 +839,7 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         write_manifest(cfg["manifest"], manifest)
     except Exception as exc:
         rollback_adopt(created, backups_done, moved)
-        raise SkxError(f"adoption failed; rolled back as far as possible: {exc}") from exc
+        raise OneskillError(f"adoption failed; rolled back as far as possible: {exc}") from exc
     print(f"adopted: {name}")
     return 0
 
@@ -865,7 +865,7 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 client for client in CLIENTS if row["clients"][client]["state"] == "unmanaged"
             ]
             hint = f"adopt {row['clients'][holders[0]]['path']}" if holders else "adopt an existing copy"
-            unresolved.append(f"{row['name']}: not in the shared library yet; run `skx {hint}` first")
+            unresolved.append(f"{row['name']}: not in the shared library yet; run `osk {hint}` first")
             continue
         body = Path(row["body"])
         for client in CLIENTS:
@@ -875,7 +875,7 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 )
             elif row["clients"][client]["state"] == "unmanaged":
                 unresolved.append(
-                    f"{row['name']}: {client} has an unmanaged real directory {row['clients'][client]['path']}; run `skx adopt`"
+                    f"{row['name']}: {client} has an unmanaged real directory {row['clients'][client]['path']}; run `osk adopt`"
                 )
         if not body.exists():
             unresolved.append(f"{row['name']}: body does not exist {body}")
@@ -890,7 +890,7 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 if normalized(body) == normalized(destination):
                     # never create a symlink whose target is its own path
                     unresolved.append(
-                        f"{row['name']}: {client}: refusing self-referential link at {destination}; run `skx adopt`"
+                        f"{row['name']}: {client}: refusing self-referential link at {destination}; run `osk adopt`"
                     )
                     continue
             if state == "missing":
@@ -953,11 +953,11 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="skx", description="Audit and reconcile skills shared across Claude, Codex and Kimi")
-    parser.add_argument("--version", action="version", version="skx 1.0.0")
+    parser = argparse.ArgumentParser(prog="osk", description="Audit and reconcile skills shared across Claude, Codex and Kimi")
+    parser.add_argument("--version", action="version", version="osk 1.0.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="interactive first-time setup; writes ~/.config/skx/config.json")
+    init_parser = subparsers.add_parser("init", help="interactive first-time setup; writes ~/.config/oneskill/config.json")
     init_parser.add_argument("--yes", action="store_true", help="accept all defaults without prompting")
 
     list_parser = subparsers.add_parser("list", help="show the skill coverage matrix")
@@ -971,7 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     adopt_parser = subparsers.add_parser("adopt", help="adopt a real in-client directory into the shared library")
     adopt_parser.add_argument("path", help="real skill directory to adopt")
-    adopt_parser.add_argument("--vendor", action="store_true", help="place under agent-env/vendor")
+    adopt_parser.add_argument("--vendor", action="store_true", help="place under the library's vendor directory")
     adopt_parser.add_argument(
         "--scope",
         default="shared",
@@ -1025,7 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "sync":
             return command_sync(args, cfg)
         parser.error("unknown command")
-    except SkxError as exc:
+    except OneskillError as exc:
         if getattr(args, "json", False):
             json.dump({"error": str(exc)}, sys.stdout, ensure_ascii=False)
             print()

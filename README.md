@@ -1,4 +1,4 @@
-# skx
+# oneskill
 
 **One skill library. Every AI coding CLI.**
 
@@ -7,11 +7,11 @@ that teach the agent how to do something specific. The problem: each client read
 directory. Write a good skill once and you end up copying it three times, then watching the
 copies quietly drift apart until you can't remember which one you actually fixed.
 
-`skx` keeps one canonical copy of every skill and symlinks it into every client. A single
+`oneskill` keeps one canonical copy of every skill and symlinks it into every client. A single
 command shows you what's shared, what's client-specific, and what's broken.
 
 ```
-$ skx list
+$ osk list
 
 skill                  source    scope        claude      codex     kimi
 ─────────────────────  ────────  ───────────  ──────────  ────────  ────────
@@ -36,7 +36,7 @@ officecli              external  shared       ! real dir  ✓ linked  ✓ linked
 
 That last row is the whole point. A client upgrade replaced a symlink with a real directory,
 so Claude is now running a private copy that no longer tracks the library. You'd never notice
-by eye. `skx doctor` tells you exactly how to fix it.
+by eye. `osk doctor` tells you exactly how to fix it.
 
 ## Why this happens
 
@@ -52,13 +52,13 @@ or sees a stale copy of it.
 ## Install
 
 ```bash
-git clone https://github.com/yxhuang/skx.git
-cd skx
-ln -s "$PWD/bin/skx" ~/.local/bin/skx    # anywhere on your PATH
+git clone https://github.com/yxhuang/oneskill.git
+cd oneskill
+ln -s "$PWD/bin/osk" ~/.local/bin/osk    # anywhere on your PATH
 
-skx init          # pick where your skill library lives
-skx scan --write  # build a manifest from what's already installed
-skx list
+osk init          # pick where your skill library lives
+osk scan --write  # build a manifest from what's already installed
+osk list
 ```
 
 Requires Python 3.9+. No dependencies, no build step — it's a single file.
@@ -67,12 +67,12 @@ Requires Python 3.9+. No dependencies, no build step — it's a single file.
 
 | Command | What it does |
 |---|---|
-| `skx list` | Coverage matrix across all clients. Add `--json` for machine output. |
-| `skx doctor` | Find drift: broken links, real directories shadowing links, manifest mismatches. Read-only — it prints fix commands, it never runs them. |
-| `skx adopt <path>` | Take a skill that exists in one client and share it with the rest. |
-| `skx sync` | Reconcile reality against the manifest. Idempotent — a second run is always a no-op. |
-| `skx scan --write` | Generate a manifest draft from your current setup. |
-| `skx init` | First-time configuration. |
+| `osk list` | Coverage matrix across all clients. Add `--json` for machine output. |
+| `osk doctor` | Find drift: broken links, real directories shadowing links, manifest mismatches. Read-only — it prints fix commands, it never runs them. |
+| `osk adopt <path>` | Take a skill that exists in one client and share it with the rest. |
+| `osk sync` | Reconcile reality against the manifest. Idempotent — a second run is always a no-op. |
+| `osk scan --write` | Generate a manifest draft from your current setup. |
+| `osk init` | First-time configuration. |
 
 ## How it works
 
@@ -92,12 +92,12 @@ others.
 
 ## It never deletes anything
 
-Managing symlink farms means moving real directories around, so `skx` is built to be
+Managing symlink farms means moving real directories around, so `oneskill` is built to be
 un-scary:
 
 - **Every destructive step asks first**, one at a time, showing the exact paths involved.
 - **Conflicts are renamed, never removed.** Anything in the way becomes
-  `<name>.skx-backup-<timestamp>`. There is no `rmtree` anywhere in the codebase.
+  `<name>.oneskill-backup-<timestamp>`. There is no `rmtree` anywhere in the codebase.
 - **`--dry-run` on `adopt` and `sync`** prints the full plan and changes nothing.
 - **Failed operations roll back** — a half-finished `adopt` restores what it moved.
 - **`list` and `doctor` are strictly read-only**, safe to run anywhere, any time.
@@ -112,10 +112,10 @@ possible at all.
 
 Claude Code *plugin* skills are deliberately not shared: they live in versioned cache paths
 that break on every plugin update, and their content is bound to Claude-specific tooling.
-`skx` reports them as `claude-only` rather than pretending otherwise.
+`oneskill` reports them as `claude-only` rather than pretending otherwise.
 
 Adding another client is a few lines — client paths are declared in one place near the top of
-`bin/skx`.
+`bin/osk`.
 
 ## Status
 
@@ -127,7 +127,7 @@ a second machine would be genuinely useful.
 python3 -m unittest discover -s tests
 ```
 
-Roadmap — a GUI over `skx list --json`, and support for more clients. The JSON output is
+Roadmap — a GUI over `osk list --json`, and support for more clients. The JSON output is
 stable enough to build against today.
 
 ## License

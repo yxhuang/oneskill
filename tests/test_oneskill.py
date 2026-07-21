@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""skx integration tests; all mutable fixtures live under /tmp."""
+"""oneskill integration tests; all mutable fixtures live under /tmp."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SKX = ROOT / "bin" / "skx"
+OSK = ROOT / "bin" / "osk"
 CLIENT_PATHS = {
     "claude": (".claude", "skills"),
     "codex": (".codex", "skills"),
@@ -21,9 +21,9 @@ CLIENT_PATHS = {
 }
 
 
-class SkxIntegrationTest(unittest.TestCase):
+class OneskillIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="skx-test-", dir="/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="oneskill-test-", dir="/tmp")
         self.base = Path(self.temporary.name)
         self.home = self.base / "home"
         self.agent = self.base / "agent-env"
@@ -33,9 +33,9 @@ class SkxIntegrationTest(unittest.TestCase):
         (self.home / ".agents" / "skills").mkdir(parents=True)
         self.env = os.environ.copy()
         self.env.update(
-            SKX_HOME=str(self.home),
-            SKX_AGENT_ENV=str(self.agent),
-            SKX_MANIFEST=str(self.manifest),
+            ONESKILL_HOME=str(self.home),
+            ONESKILL_LIBRARY=str(self.agent),
+            ONESKILL_MANIFEST=str(self.manifest),
         )
 
     def tearDown(self) -> None:
@@ -59,9 +59,9 @@ class SkxIntegrationTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def run_skx(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_osk(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(SKX), *args],
+            [str(OSK), *args],
             env=self.env,
             input=input_text,
             text=True,
@@ -98,7 +98,7 @@ class SkxIntegrationTest(unittest.TestCase):
 
     def test_list_covers_healthy_missing_shadow_and_broken(self) -> None:
         self.build_audit_fixture()
-        result = self.run_skx("list", "--json")
+        result = self.run_osk("list", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         rows = {row["name"]: row for row in payload["skills"]}
@@ -110,7 +110,7 @@ class SkxIntegrationTest(unittest.TestCase):
 
     def test_doctor_detects_required_anomalies(self) -> None:
         self.build_audit_fixture()
-        result = self.run_skx("doctor", "--json")
+        result = self.run_osk("doctor", "--json")
         self.assertEqual(result.returncode, 1)
         report = json.loads(result.stdout)
         kinds = {issue["type"] for issue in report["issues"]}
@@ -122,7 +122,7 @@ class SkxIntegrationTest(unittest.TestCase):
         source = self.client_path("codex", "new-skill")
         source.mkdir()
         (source / "SKILL.md").write_text("# new\n", encoding="utf-8")
-        result = self.run_skx("adopt", str(source), "--yes")
+        result = self.run_osk("adopt", str(source), "--yes")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         body = self.agent / "codex" / "skills" / "new-skill"
         self.assertTrue((body / "SKILL.md").is_file())
@@ -138,7 +138,7 @@ class SkxIntegrationTest(unittest.TestCase):
         self.write_manifest([])
         source = self.client_path("claude", "dry")
         source.mkdir()
-        result = self.run_skx("adopt", str(source), "--dry-run")
+        result = self.run_osk("adopt", str(source), "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(source.is_dir())
         self.assertFalse(source.is_symlink())
@@ -149,7 +149,7 @@ class SkxIntegrationTest(unittest.TestCase):
         source = self.client_path("claude", "refuse")
         source.mkdir()
         (source / "SKILL.md").write_text("# keep\n", encoding="utf-8")
-        result = self.run_skx("adopt", str(source), input_text="y\nn\n")
+        result = self.run_osk("adopt", str(source), input_text="y\nn\n")
         self.assertEqual(result.returncode, 1)
         self.assertIn("no changes were made", result.stdout)
         self.assertTrue(source.is_dir())
@@ -163,10 +163,10 @@ class SkxIntegrationTest(unittest.TestCase):
         self.write_manifest(
             [{"name": "sync-me", "source": "vendor", "body": str(body), "scope": "shared"}]
         )
-        first = self.run_skx("sync", "--yes")
+        first = self.run_osk("sync", "--yes")
         self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
         self.assertIn("2 changes applied", first.stdout)
-        second = self.run_skx("sync", "--yes")
+        second = self.run_osk("sync", "--yes")
         self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
         self.assertIn("no changes", second.stdout)
 
@@ -178,10 +178,10 @@ class SkxIntegrationTest(unittest.TestCase):
         self.write_manifest(
             [{"name": "conflict", "source": "vendor", "body": str(body), "scope": ["claude"]}]
         )
-        result = self.run_skx("sync", "--yes")
+        result = self.run_osk("sync", "--yes")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertTrue(conflict.is_symlink())
-        backups = list(conflict.parent.glob("conflict.skx-backup-*"))
+        backups = list(conflict.parent.glob("conflict.oneskill-backup-*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / "local.txt").read_text(encoding="utf-8"), "keep")
 
@@ -191,7 +191,7 @@ class SkxIntegrationTest(unittest.TestCase):
         self.write_manifest(
             [{"name": "one", "source": "self", "body": str(body), "scope": ["claude"]}]
         )
-        result = self.run_skx("list", "--json")
+        result = self.run_osk("list", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsInstance(json.loads(result.stdout), dict)
         self.assertEqual(result.stderr, "")
@@ -199,20 +199,20 @@ class SkxIntegrationTest(unittest.TestCase):
     def test_scan_marks_single_client_for_review(self) -> None:
         body = self.body("kimi/skills/kimi-only")
         self.link("kimi", "kimi-only", body)
-        result = self.run_skx("scan", "--write")
+        result = self.run_osk("scan", "--write")
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
         entry = next(item for item in manifest["skills"] if item["name"] == "kimi-only")
         self.assertEqual(entry["scope"], ["kimi"])
         self.assertIn("needs review", entry["review"])
-        doctor = self.run_skx("doctor", "--json")
+        doctor = self.run_osk("doctor", "--json")
         self.assertEqual(doctor.returncode, 1)
         issues = json.loads(doctor.stdout)["issues"]
         self.assertTrue(any(issue["type"] == "scope_review" for issue in issues))
 
     def test_list_groups_shared_and_attention_sections(self) -> None:
         self.build_audit_fixture()
-        result = self.run_skx("list")
+        result = self.run_osk("list")
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
         self.assertIn("SHARED (all three clients)", out)
@@ -234,14 +234,14 @@ class SkxIntegrationTest(unittest.TestCase):
         self.write_manifest(
             [{"name": "tidy", "source": "self", "body": str(body), "scope": "shared"}]
         )
-        result = self.run_skx("list")
+        result = self.run_osk("list")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SHARED (all three clients)", result.stdout)
         self.assertNotIn("NEEDS ATTENTION", result.stdout)
         self.assertIn("0 issues", result.stdout)
 
     def make_unmanaged_fixture(self) -> Path:
-        self.agent.mkdir(parents=True, exist_ok=True)  # empty library, as after `skx init`
+        self.agent.mkdir(parents=True, exist_ok=True)  # empty library, as after `osk init`
         real = self.client_path("claude", "my-skill")
         real.mkdir()
         (real / "SKILL.md").write_text("# mine\n", encoding="utf-8")
@@ -249,29 +249,29 @@ class SkxIntegrationTest(unittest.TestCase):
 
     def test_unmanaged_real_dir_suggests_adopt(self) -> None:
         real = self.make_unmanaged_fixture()
-        scan = self.run_skx("scan", "--write")
+        scan = self.run_osk("scan", "--write")
         self.assertEqual(scan.returncode, 0, scan.stderr)
         manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
         entry = next(item for item in manifest["skills"] if item["name"] == "my-skill")
         self.assertIsNone(entry["body"])
-        listing = self.run_skx("list", "--json")
+        listing = self.run_osk("list", "--json")
         self.assertEqual(listing.returncode, 0, listing.stderr)
         rows = {row["name"]: row for row in json.loads(listing.stdout)["skills"]}
         self.assertEqual(rows["my-skill"]["clients"]["claude"]["state"], "unmanaged")
-        doctor = self.run_skx("doctor", "--json")
+        doctor = self.run_osk("doctor", "--json")
         self.assertEqual(doctor.returncode, 1)
         issues = json.loads(doctor.stdout)["issues"]
         unmanaged = [issue for issue in issues if issue["type"] == "unmanaged"]
         self.assertEqual(len(unmanaged), 1)
-        self.assertIn("skx adopt", unmanaged[0]["suggested_command"])
+        self.assertIn("osk adopt", unmanaged[0]["suggested_command"])
         self.assertIn(str(real), unmanaged[0]["suggested_command"])
-        text_listing = self.run_skx("list")
+        text_listing = self.run_osk("list")
         self.assertIn("NEEDS ATTENTION", text_listing.stdout)
 
     def test_doctor_never_suggests_self_referential_link(self) -> None:
         self.build_audit_fixture()
         self.make_unmanaged_fixture()
-        doctor = self.run_skx("doctor", "--json")
+        doctor = self.run_osk("doctor", "--json")
         self.assertEqual(doctor.returncode, 1)
         issues = json.loads(doctor.stdout)["issues"]
         self.assertTrue(issues)
@@ -293,7 +293,7 @@ class SkxIntegrationTest(unittest.TestCase):
         self.write_manifest(
             [{"name": "shadowed", "source": "vendor", "body": str(body), "scope": "shared"}]
         )
-        doctor = self.run_skx("doctor", "--json")
+        doctor = self.run_osk("doctor", "--json")
         self.assertEqual(doctor.returncode, 1)
         issues = json.loads(doctor.stdout)["issues"]
         shadow = [issue for issue in issues if issue["type"] == "real_directory"]
@@ -306,29 +306,29 @@ class SkxIntegrationTest(unittest.TestCase):
         self.assertEqual(Path(tokens[2]), body)
 
 
-class SkxConfigTest(unittest.TestCase):
+class OneskillConfigTest(unittest.TestCase):
     """Config-file resolution tests; everything lives under /tmp."""
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="skx-config-test-", dir="/tmp")
+        self.temporary = tempfile.TemporaryDirectory(prefix="oneskill-config-test-", dir="/tmp")
         self.base = Path(self.temporary.name)
         self.home = self.base / "home"
         self.library = self.base / "library"
         self.manifest = self.base / "skills.json"
-        self.config_path = self.home / ".config" / "skx" / "config.json"
+        self.config_path = self.home / ".config" / "oneskill" / "config.json"
         for parts in CLIENT_PATHS.values():
             self.home.joinpath(*parts).mkdir(parents=True)
         self.env = os.environ.copy()
-        for key in ("SKX_AGENT_ENV", "SKX_MANIFEST"):
+        for key in ("ONESKILL_LIBRARY", "ONESKILL_MANIFEST"):
             self.env.pop(key, None)
-        self.env["SKX_HOME"] = str(self.home)
+        self.env["ONESKILL_HOME"] = str(self.home)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_skx(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_osk(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(SKX), *args],
+            [str(OSK), *args],
             env=self.env,
             input=input_text,
             text=True,
@@ -367,7 +367,7 @@ class SkxConfigTest(unittest.TestCase):
     def test_config_file_is_used_when_env_vars_absent(self) -> None:
         self.make_fixture(self.library, self.manifest)
         self.write_config(self.library, self.manifest)
-        result = self.run_skx("list", "--json")
+        result = self.run_osk("list", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["manifest"], str(self.manifest))
@@ -378,35 +378,35 @@ class SkxConfigTest(unittest.TestCase):
         self.make_fixture(self.library, self.manifest)
         # config file points at paths that do not exist; env vars must win
         self.write_config(self.base / "bogus-library", self.base / "bogus-manifest.json")
-        self.env["SKX_AGENT_ENV"] = str(self.library)
-        self.env["SKX_MANIFEST"] = str(self.manifest)
-        result = self.run_skx("list", "--json")
+        self.env["ONESKILL_LIBRARY"] = str(self.library)
+        self.env["ONESKILL_MANIFEST"] = str(self.manifest)
+        result = self.run_osk("list", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["manifest"], str(self.manifest))
 
     def test_missing_library_error_points_to_init(self) -> None:
-        self.env["SKX_AGENT_ENV"] = str(self.base / "no-such-library")
-        self.env["SKX_MANIFEST"] = str(self.manifest)
-        result = self.run_skx("list")
+        self.env["ONESKILL_LIBRARY"] = str(self.base / "no-such-library")
+        self.env["ONESKILL_MANIFEST"] = str(self.manifest)
+        result = self.run_osk("list")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("skx init", result.stderr)
+        self.assertIn("osk init", result.stderr)
 
     def test_init_yes_writes_config_with_defaults(self) -> None:
-        result = self.run_skx("init", "--yes")
+        result = self.run_osk("init", "--yes")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(self.config_path.read_text(encoding="utf-8"))
-        default_library = self.home / ".skx" / "library"
+        default_library = self.home / ".oneskill" / "library"
         self.assertEqual(payload["library"], str(default_library))
         self.assertEqual(
-            payload["manifest"], str(self.home / ".config" / "skx" / "skills.json")
+            payload["manifest"], str(self.home / ".config" / "oneskill" / "skills.json")
         )
         self.assertTrue(default_library.is_dir())
 
     def test_init_refuses_to_overwrite_existing_config(self) -> None:
         self.write_config(self.library, self.manifest)
         before = self.config_path.read_text(encoding="utf-8")
-        result = self.run_skx("init", input_text="n\n")
+        result = self.run_osk("init", input_text="n\n")
         self.assertEqual(result.returncode, 1)
         self.assertIn("left unchanged", result.stdout)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
