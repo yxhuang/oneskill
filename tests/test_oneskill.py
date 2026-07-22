@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import io
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shlex
@@ -11,7 +13,10 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +26,16 @@ CLIENT_PATHS = {
     "codex": (".codex", "skills"),
     "kimi": (".kimi-code", "skills"),
 }
+
+
+def load_osk_module():
+    loader = importlib.machinery.SourceFileLoader("oneskill_cli_test", str(OSK))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("cannot load bin/osk for rollback testing")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 class OneskillIntegrationTest(unittest.TestCase):
@@ -45,6 +60,18 @@ class OneskillIntegrationTest(unittest.TestCase):
 
     def client_path(self, client: str, name: str) -> Path:
         return self.home.joinpath(*CLIENT_PATHS[client], name)
+
+    def client_backups(self, client: str, name: str) -> list[Path]:
+        return list(
+            (self.home / ".oneskill" / "backups" / client).glob(
+                f"{name}.oneskill-backup-*"
+            )
+        )
+
+    def assert_no_client_backups(self) -> None:
+        for client in CLIENT_PATHS:
+            skill_dir = self.home.joinpath(*CLIENT_PATHS[client])
+            self.assertEqual(list(skill_dir.glob("*.oneskill-backup*")), [])
 
     def body(self, relative: str) -> Path:
         path = self.agent / relative
@@ -175,6 +202,122 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertFalse((self.agent / "claude" / "skills" / "refuse").exists())
         self.assertEqual(json.loads(self.manifest.read_text())["skills"], [])
 
+    def test_adopt_merges_duplicate_into_external_backup_without_extra(self) -> None:
+        self.write_manifest([])
+        source = self.client_path("claude", "duplicate")
+        source.mkdir()
+        (source / "SKILL.md").write_text("# canonical\n", encoding="utf-8")
+        conflict = self.client_path("codex", "duplicate")
+        conflict.mkdir()
+        (conflict / "SKILL.md").write_text("# redundant\n", encoding="utf-8")
+
+        result = self.run_osk("adopt", str(source), "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        backups = self.client_backups("codex", "duplicate")
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "SKILL.md").read_text(), "# redundant\n")
+        self.assert_no_client_backups()
+        listing = self.run_osk("list")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertNotIn("! extra", listing.stdout)
+        self.assertIn("0 issues", listing.stdout)
+
+    def test_adopt_failure_restores_external_backup(self) -> None:
+        self.write_manifest([])
+        source = self.client_path("claude", "rollback")
+        source.mkdir()
+        (source / "source.txt").write_text("source", encoding="utf-8")
+        conflict = self.client_path("codex", "rollback")
+        conflict.mkdir()
+        (conflict / "conflict.txt").write_text("conflict", encoding="utf-8")
+        osk = load_osk_module()
+        cfg = {
+            "home": self.home,
+            "library": self.agent,
+            "manifest": self.manifest,
+            **{
+                client: self.home.joinpath(*parts)
+                for client, parts in CLIENT_PATHS.items()
+            },
+        }
+        args = SimpleNamespace(
+            path=str(source), vendor=False, scope="shared", yes=True, dry_run=False
+        )
+
+        with redirect_stdout(io.StringIO()):
+            with mock.patch.object(osk, "write_manifest", side_effect=OSError("forced failure")):
+                with self.assertRaises(osk.OneskillError):
+                    osk.command_adopt_one(args, cfg)
+
+        self.assertFalse(source.is_symlink())
+        self.assertEqual((source / "source.txt").read_text(), "source")
+        self.assertFalse(conflict.is_symlink())
+        self.assertEqual((conflict / "conflict.txt").read_text(), "conflict")
+        self.assertFalse((self.agent / "claude" / "skills" / "rollback").exists())
+        self.assertEqual(self.client_backups("codex", "rollback"), [])
+        self.assert_no_client_backups()
+
+    def test_adopt_all_adopts_each_name_once_and_cleans_inventory(self) -> None:
+        self.agent.mkdir(parents=True)
+        fixtures = [
+            ("claude", "alpha", "alpha"),
+            ("kimi", "beta", "beta"),
+            ("claude", "duplicate", "canonical"),
+            ("codex", "duplicate", "redundant"),
+        ]
+        for client, name, content in fixtures:
+            path = self.client_path(client, name)
+            path.mkdir()
+            (path / "SKILL.md").write_text(content, encoding="utf-8")
+        scan = self.run_osk("scan", "--write")
+        self.assertEqual(scan.returncode, 0, scan.stderr)
+
+        preview = self.run_osk("adopt", "--all", "--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stderr + preview.stdout)
+        self.assertIn("3 skill(s) planned, none applied", preview.stdout)
+        self.assertFalse(self.client_path("claude", "alpha").is_symlink())
+        self.assertIsNone(
+            next(
+                item
+                for item in json.loads(self.manifest.read_text())["skills"]
+                if item["name"] == "alpha"
+            )["body"]
+        )
+
+        result = self.run_osk("adopt", "--all", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(result.stdout.count("adopted: duplicate"), 1)
+        self.assertIn("adopt --all complete: 3 skill(s) adopted", result.stdout)
+        listing = self.run_osk("list", "--json")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        payload = json.loads(listing.stdout)
+        self.assertEqual(payload["summary"]["skills"], 3)
+        self.assertEqual(payload["summary"]["three_client_healthy"], 3)
+        self.assertEqual(payload["summary"]["anomalies"], 0)
+        self.assert_no_client_backups()
+        backups = self.client_backups("codex", "duplicate")
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "SKILL.md").read_text(), "redundant")
+
+    def test_doctor_deduplicates_same_name_unmanaged_suggestion(self) -> None:
+        self.agent.mkdir(parents=True)
+        for client in ("claude", "codex"):
+            path = self.client_path(client, "duplicate")
+            path.mkdir()
+            (path / "SKILL.md").write_text(client, encoding="utf-8")
+        scan = self.run_osk("scan", "--write")
+        self.assertEqual(scan.returncode, 0, scan.stderr)
+
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 1)
+        report = json.loads(doctor.stdout)
+        unmanaged = [issue for issue in report["issues"] if issue["type"] == "unmanaged"]
+        self.assertEqual(len(unmanaged), 1)
+        self.assertEqual(unmanaged[0]["client"], "claude")
+        self.assertEqual(unmanaged[0]["duplicate_clients"], ["codex"])
+        self.assertIn("will be merged and backed up", unmanaged[0]["message"])
+        self.assertEqual(report["summary"]["by_type"]["unmanaged"], 1)
+
     def test_sync_is_idempotent(self) -> None:
         body = self.body("vendor/sync-me")
         self.link("claude", "sync-me", body)
@@ -199,9 +342,12 @@ class OneskillIntegrationTest(unittest.TestCase):
         result = self.run_osk("sync", "--yes")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertTrue(conflict.is_symlink())
-        backups = list(conflict.parent.glob("conflict.oneskill-backup-*"))
+        backups = self.client_backups("claude", "conflict")
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / "local.txt").read_text(encoding="utf-8"), "keep")
+        self.assert_no_client_backups()
+        listing = self.run_osk("list")
+        self.assertNotIn("! extra", listing.stdout)
 
     def test_list_json_is_clean_json(self) -> None:
         body = self.body("claude/skills/one")
@@ -318,7 +464,11 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertEqual(len(shadow), 1)
         self.assertEqual(shadow[0]["client"], "claude")
         self.assertIn("ln -s", shadow[0]["suggested_command"])
-        tokens = shlex.split(shadow[0]["suggested_command"].split("&&")[1])
+        tokens = next(
+            shlex.split(segment)
+            for segment in shadow[0]["suggested_command"].split("&&")
+            if shlex.split(segment)[:2] == ["ln", "-s"]
+        )
         self.assertEqual(tokens[:2], ["ln", "-s"])
         self.assertNotEqual(tokens[2], tokens[3])
         self.assertEqual(Path(tokens[2]), body)
@@ -400,12 +550,15 @@ class OneskillIntegrationTest(unittest.TestCase):
         result = self.run_osk("install", str(fixture), "--yes")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         body_backups = list(target.parent.glob("collision.oneskill-backup-*"))
-        client_backups = list(conflict.parent.glob("collision.oneskill-backup-*"))
+        client_backups = self.client_backups("claude", "collision")
         self.assertEqual(len(body_backups), 1)
         self.assertEqual((body_backups[0] / "old.txt").read_text(), "old body")
         self.assertEqual(len(client_backups), 1)
         self.assertEqual((client_backups[0] / "local.txt").read_text(), "local copy")
         self.assertTrue(conflict.is_symlink())
+        self.assert_no_client_backups()
+        listing = self.run_osk("list")
+        self.assertNotIn("! extra", listing.stdout)
 
     def test_install_conflict_refusal_changes_nothing(self) -> None:
         fixture = self.remote_fixture(name="refused")

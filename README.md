@@ -41,14 +41,17 @@ curl -fsSL https://raw.githubusercontent.com/yxhuang/oneskill/main/install.sh | 
 
 osk init          # pick where your skill library lives
 osk scan --write  # inventory every skill you already have, across all clients
+osk adopt --all   # adopt every unmanaged skill; confirm each move
 osk list          # see the coverage matrix
 ```
 
-Skills you already have show up as `unmanaged`. Bring each one under management with the
-command `osk doctor` prints for it — `osk adopt <path>` moves the body into the library,
-replaces the original with a symlink, and links it into the other clients. If you had
-hand-copied the same skill into two clients, one `adopt` unifies them (the redundant copy
-is renamed as a backup, never deleted).
+Skills you already have show up as `unmanaged`. `osk adopt --all` brings them all under
+management in one pass; use `--dry-run` to preview or `--yes` after review for unattended
+onboarding. You can also run the individual command `osk doctor` prints —
+`osk adopt <path>` moves the body into the library, replaces the original with a symlink,
+and links it into the other clients. If you hand-copied the same skill into two clients,
+one adoption unifies them (the redundant copy is moved to an external backup, never
+deleted).
 
 Requires Python 3.9+. A single file, zero dependencies, no build step.
 
@@ -76,7 +79,7 @@ sources you trust.
 |---|---|
 | `osk list` | Coverage matrix across all clients. `--json` for machine output. |
 | `osk doctor` | Detect drift: broken links, shadowed symlinks, manifest mismatches. Read-only — prints fixes, never runs them. |
-| `osk adopt <path>` | Take a skill living in one client and share it with the rest. |
+| `osk adopt <path>` / `osk adopt --all` | Adopt one in-client skill, or every unmanaged skill in one pass. |
 | `osk install <source>` | Install from a local directory or `gh:owner/repo[/subdir][@ref]`. |
 | `osk update [name]` | Update one remote skill, or all of them. |
 | `osk uninstall <name>` | Unlink everywhere; body kept as a timestamped backup. |
@@ -102,8 +105,9 @@ Managing symlink farms means moving real directories around, so `oneskill` is bu
 be un-scary:
 
 - **Every destructive step asks first**, showing the exact paths involved.
-- **Conflicts are renamed, never removed** — anything in the way becomes
-  `<name>.oneskill-backup-<timestamp>`. There is no `rmtree` in the codebase.
+- **Conflicts are renamed, never removed.** Client-side copies move outside the clients'
+  load paths to `~/.oneskill/backups/<client>/<name>.oneskill-backup-<timestamp>`; library
+  bodies keep their adjacent timestamped backups. There is no `rmtree` in the codebase.
 - **`--dry-run` everywhere** prints the full plan and changes nothing.
 - **Failed operations roll back** to where they started.
 - **`list` and `doctor` are strictly read-only.**
@@ -121,9 +125,11 @@ skill, run `osk adopt <path>`"* — your agent maintains the library for you, wh
 more reliable than any file watcher.
 
 **I already have skills everywhere. How painful is onboarding?**
-`osk scan --write` inventories everything in one shot; `osk doctor` then prints one
-`adopt` command per unmanaged skill. Duplicated hand-copies of the same skill collapse
-into one shared body on the first `adopt`.
+`osk scan --write` inventories everything in one shot, then `osk adopt --all` adopts every
+unmanaged skill. It still asks before each move unless you pass `--yes`. Duplicated
+hand-copies of the same skill collapse into one shared body, with redundant copies safely
+backed up outside the client skills directories. `osk doctor` also prints one deduplicated
+`adopt` command per skill if you prefer to work through them individually.
 
 **Can I add another client (Gemini CLI, Copilot CLI, …)?**
 Yes — client paths live in a single mapping near the top of `bin/osk`. One entry, and
@@ -136,7 +142,7 @@ instead of pretending.
 
 ## Status
 
-Young and honest about it: the safety properties are covered by 31 offline tests and CI
+Young and honest about it: the safety properties are covered by 35 offline tests and CI
 runs on Linux and macOS across Python 3.9/3.13 — but it has run on a handful of setups so
 far. Bug reports from a second machine are genuinely useful.
 
@@ -144,8 +150,8 @@ far. Bug reports from a second machine are genuinely useful.
 python3 -m unittest discover -s tests
 ```
 
-Roadmap: bulk `adopt --all` for one-shot onboarding, more clients, and a GUI over
-`osk list --json` (the JSON keys are stable to build against today).
+Implemented: bulk `adopt --all` for one-pass onboarding. Roadmap: more clients and a GUI
+over `osk list --json` (the JSON keys are stable to build against today).
 
 ## License
 

@@ -766,7 +766,9 @@ def shell_join(*parts: Path | str) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
-def repair_for(row: dict[str, Any], client: str, status: dict[str, Any]) -> str:
+def repair_for(
+    row: dict[str, Any], client: str, status: dict[str, Any], cfg: dict[str, Path]
+) -> str:
     path = Path(status["path"])
     raw_body = row.get("body")
     body = Path(raw_body) if raw_body is not None else None
@@ -783,19 +785,23 @@ def repair_for(row: dict[str, Any], client: str, status: dict[str, Any]) -> str:
         if body is None or normalized(body) == normalized(path):
             # never emit a command whose source and target are the same path
             return shell_join("osk", "adopt", path)
-        backup = Path(f"{path}.oneskill-backup")
+        backup = backup_target(path, cfg)
         if not body.exists():
             return f"restore the body {shlex.quote(str(body))} first, then rebuild {shlex.quote(str(path))}"
-        return f"{shell_join('mv', path, backup)} && {shell_join('ln', '-s', body, path)}"
+        return (
+            f"{shell_join('mkdir', '-p', backup.parent)} && "
+            f"{shell_join('mv', path, backup)} && {shell_join('ln', '-s', body, path)}"
+        )
     if state == "extra":
-        return shell_join("mv", path, Path(f"{path}.unmanaged-backup"))
+        backup = backup_target(path, cfg)
+        return f"{shell_join('mkdir', '-p', backup.parent)} && {shell_join('mv', path, backup)}"
     if state == "plugin_missing":
         plugin_id = row.get("plugin_id", row["name"])
         return f"reinstall plugin {shlex.quote(str(plugin_id))} with Claude Code"
     return "no repair needed"
 
 
-def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
+def diagnose(inventory: dict[str, Any], cfg: dict[str, Path]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     body_reported: set[str] = set()
     for row in inventory["skills"]:
@@ -830,10 +836,33 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
                 body_reported.add(row["name"])
+        unmanaged = [
+            (client, row["clients"][client])
+            for client in CLIENTS
+            if row["clients"][client]["state"] == "unmanaged"
+        ]
+        if unmanaged:
+            client, status = unmanaged[0]
+            duplicate_clients = [item[0] for item in unmanaged[1:]]
+            message = "not in the shared library yet"
+            if duplicate_clients:
+                names = ", ".join(duplicate_clients)
+                message += f"; same-name copies in {names} will be merged and backed up"
+            issue = {
+                "type": "unmanaged",
+                "skill": row["name"],
+                "client": client,
+                "path": status["path"],
+                "message": message,
+                "suggested_command": repair_for(row, client, status, cfg),
+            }
+            if duplicate_clients:
+                issue["duplicate_clients"] = duplicate_clients
+            issues.append(issue)
         for client in CLIENTS:
             status = row["clients"][client]
             state = status["state"]
-            if state in {"healthy", "plugin", "not_applicable"}:
+            if state in {"healthy", "plugin", "not_applicable", "unmanaged"}:
                 continue
             messages = {
                 "missing": "manifest declares a symlink that is missing",
@@ -852,7 +881,7 @@ def diagnose(inventory: dict[str, Any]) -> dict[str, Any]:
                     "client": client,
                     "path": status["path"],
                     "message": messages[state],
-                    "suggested_command": repair_for(row, client, status),
+                    "suggested_command": repair_for(row, client, status, cfg),
                 }
             )
     counts = Counter(issue["type"] for issue in issues)
@@ -895,6 +924,27 @@ def unique_backup(path: Path) -> Path:
         candidate = Path(f"{path}.oneskill-backup-{stamp}-{number}")
         number += 1
     return candidate
+
+
+def backup_target(path: Path, cfg: dict[str, Path]) -> Path:
+    """Choose a backup path without leaving loadable copies in client skill directories."""
+    for client in CLIENTS:
+        if not within(path.parent, cfg[client]):
+            continue
+        external_root = cfg["home"] / ".oneskill" / "backups"
+        if any(within(external_root, cfg[item]) for item in CLIENTS):
+            raise OneskillError(
+                f"external backup directory overlaps a client skills directory: {external_root}"
+            )
+        backup_root = external_root / client
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = backup_root / f"{path.name}.oneskill-backup-{stamp}"
+        number = 2
+        while path_exists(candidate):
+            candidate = backup_root / f"{path.name}.oneskill-backup-{stamp}-{number}"
+            number += 1
+        return candidate
+    return unique_backup(path)
 
 
 def confirm(description: str, assume_yes: bool, dry_run: bool = False) -> bool:
@@ -1017,7 +1067,7 @@ def command_install(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 )
             elif path_exists(destination):
                 actions.append(
-                    {"kind": "replace_real", "path": destination, "backup": unique_backup(destination)}
+                    {"kind": "replace_real", "path": destination, "backup": backup_target(destination, cfg)}
                 )
             else:
                 actions.append({"kind": "create", "path": destination})
@@ -1062,6 +1112,7 @@ def command_install(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 destination = action["path"]
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if action["kind"] == "replace_real":
+                    action["backup"].parent.mkdir(parents=True, exist_ok=True)
                     os.replace(destination, action["backup"])
                     path_backups.append((destination, action["backup"]))
                 elif action["kind"] == "replace_link":
@@ -1273,7 +1324,7 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+def command_adopt_one(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
     source_path = Path(args.path).expanduser().absolute()
     if source_path.is_symlink() or not source_path.is_dir():
         raise OneskillError("adopt only accepts existing real directories inside a client skills directory")
@@ -1305,7 +1356,7 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
             continue
         if destination.is_symlink() and link_target(destination) == normalized(target):
             continue
-        replacements.append((destination, unique_backup(destination)))
+        replacements.append((destination, backup_target(destination, cfg)))
 
     confirmations = [
         f"move body {source_path} -> {target}",
@@ -1340,6 +1391,7 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         created.append(source_path)
         for destination, backup in replacements:
             destination.parent.mkdir(parents=True, exist_ok=True)
+            backup.parent.mkdir(parents=True, exist_ok=True)
             os.replace(destination, backup)
             backups_done.append((destination, backup))
             destination.symlink_to(target, target_is_directory=True)
@@ -1372,6 +1424,48 @@ def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         rollback_adopt(created, backups_done, moved)
         raise OneskillError(f"adoption failed; rolled back as far as possible: {exc}") from exc
     print(f"adopted: {name}")
+    return 0
+
+
+def unmanaged_adoption_sources(cfg: dict[str, Path]) -> list[tuple[str, Path]]:
+    manifest = read_manifest(cfg["manifest"], allow_missing=True)
+    inventory = build_inventory(cfg, manifest)
+    sources: list[tuple[str, Path]] = []
+    for row in inventory["skills"]:
+        for client in CLIENTS:
+            status = row["clients"][client]
+            if status["state"] == "unmanaged":
+                sources.append((row["name"], Path(status["path"])))
+                break
+    return sources
+
+
+def command_adopt(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    if not args.adopt_all:
+        return command_adopt_one(args, cfg)
+
+    sources = unmanaged_adoption_sources(cfg)
+    if not sources:
+        print("No unmanaged skills to adopt.")
+        return 0
+    total = len(sources)
+    for index, (name, source) in enumerate(sources, 1):
+        print(f"Adopting {index}/{total}: {name} from {source}")
+        item_args = argparse.Namespace(
+            path=str(source),
+            vendor=args.vendor,
+            scope=args.scope,
+            dry_run=args.dry_run,
+            yes=args.yes,
+        )
+        result = command_adopt_one(item_args, cfg)
+        if result != 0:
+            print(f"Stopped before adopting the remaining skills; {name} was not adopted.", file=sys.stderr)
+            return result
+    if args.dry_run:
+        print(f"adopt --all dry-run complete: {total} skill(s) planned, none applied.")
+    else:
+        print(f"adopt --all complete: {total} skill(s) adopted.")
     return 0
 
 
@@ -1432,7 +1526,7 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                         "kind": "replace",
                         "path": destination,
                         "body": body,
-                        "backup": unique_backup(destination),
+                        "backup": backup_target(destination, cfg),
                         "state": state,
                     }
                 )
@@ -1464,6 +1558,7 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if action["kind"] == "replace":
+                action["backup"].parent.mkdir(parents=True, exist_ok=True)
                 os.replace(destination, action["backup"])
             destination.symlink_to(action["body"], target_is_directory=True)
             changed += 1
@@ -1500,8 +1595,15 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser = subparsers.add_parser("scan", help="scan the environment and draft a manifest")
     scan_parser.add_argument("--write", action="store_true", help="write the manifest; otherwise print to stdout")
 
-    adopt_parser = subparsers.add_parser("adopt", help="adopt a real in-client directory into the shared library")
-    adopt_parser.add_argument("path", help="real skill directory to adopt")
+    adopt_parser = subparsers.add_parser("adopt", help="adopt real in-client directories into the shared library")
+    adopt_source = adopt_parser.add_mutually_exclusive_group(required=True)
+    adopt_source.add_argument("path", nargs="?", help="real skill directory to adopt")
+    adopt_source.add_argument(
+        "--all",
+        dest="adopt_all",
+        action="store_true",
+        help="adopt every unmanaged skill, merging same-name client copies once",
+    )
     adopt_parser.add_argument("--vendor", action="store_true", help="place under the library's vendor directory")
     adopt_parser.add_argument(
         "--scope",
@@ -1566,7 +1668,7 @@ def main(argv: list[str] | None = None) -> int:
                 render_table(inventory)
             return 0
         if args.command == "doctor":
-            report = diagnose(build_inventory(cfg, read_manifest(cfg["manifest"])))
+            report = diagnose(build_inventory(cfg, read_manifest(cfg["manifest"])), cfg)
             if args.json:
                 json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
                 print()
