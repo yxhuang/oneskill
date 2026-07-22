@@ -6,96 +6,95 @@
 ![Zero dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/yxhuang/oneskill/pulls)
 
-**一份技能库,喂饱所有 AI 编程 CLI。**
+**所有 AI 编程 CLI，共用一个技能库。**
 
 [English](../README.md) | 简体中文
 
-Claude Code、Codex CLI、Kimi CLI 都能加载 *skills*——带一个 `SKILL.md` 的文件夹,
-教你的 agent 做某件具体的事,而且三家用的是同一种格式。问题在于:每个客户端只读
-自己的目录。于是每个好用的技能都被复制三份,然后各份悄悄分叉——直到你想不起来
-到底改的是哪一份。
+Claude Code、Codex CLI、Kimi CLI 都会加载 skill，也就是一个带 `SKILL.md` 的文件夹，
+告诉 agent 某件事该怎么做。三家用的是同一种格式，可每个工具只认自己的目录。于是你写好
+一个 skill，得复制三份；时间一长，三份各自被改过，慢慢就不一样了，你也记不清哪份才是
+对的。
 
-`oneskill` 为每个技能只保留**一份本体**,用软链接进每个客户端。一条命令看清:
-哪些三端共享、哪些是单端专属、哪些已经悄悄坏掉了。
+oneskill 让每个 skill 只留一份，用软链接到各个工具。一条命令就能看清：哪些三端都有、
+哪些只在某一端、哪些已经悄悄坏了。
 
 <p align="center">
   <img src="demo.svg" width="720"
-       alt="osk list 输出:覆盖矩阵分为三段——三端共享、单端专属、需要处理,其中一个技能在 Claude 端被真实目录遮蔽了软链。">
+       alt="osk list 的输出：覆盖矩阵分成三段，三端共享、单端专属、需要处理，其中一个技能在 Claude 端被真实目录盖住了软链。">
 </p>
 
-那行琥珀色就是这个工具存在的意义:某次客户端升级把软链替换成了真实目录,
-Claude 从此用着一份不再跟随库更新的私有副本——肉眼根本发现不了。
-`osk doctor` 会直接打出修复命令。
+最下面那行标红的，正是这个工具存在的理由。某次工具升级把软链换成了真实目录，Claude
+从此用上一份自己的副本，不再跟着库走。这种事光靠眼睛根本看不出来，`osk doctor` 会把
+该怎么修直接告诉你。
 
-## 为什么需要它
+## 它解决什么
 
-软链农场会烂掉,而且烂得悄无声息:
+软链这东西用久了会坏，而且坏得一点声响都没有：
 
-- **客户端升级**会把软链覆盖成真实文件,悄悄分叉你的配置;
-- **新技能**建在你当时恰好在用的那个客户端里,就永远留在那儿了;
-- **卸载**留下指向空处的死链。
+- 工具升级时可能把软链盖成真实文件，两份从此各走各的；
+- 新 skill 建在你当时用的那个工具里，然后就一直留在那；
+- 卸载旧 skill，会留下一条指向空目录的死链。
 
-没有任何报错。你的 agent 只是安静地不再看到你写的技能——或者一直在用过期的副本。
+这些都不会报错。你的 agent 只是悄悄看不到你写的 skill 了，或者一直在用一份过时的。
 
-## 快速开始
+## 快速上手
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yxhuang/oneskill/main/install.sh | sh
 
-osk init          # 选定技能库的位置
-osk scan --write  # 盘点你在所有客户端已有的全部技能
-osk adopt --all   # 一次收编全部未纳管技能;每次移动前仍会确认
-osk list          # 查看覆盖矩阵
+osk init          # 选定技能库放在哪
+osk scan --write  # 把你各个工具里已有的 skill 盘点出来
+osk adopt --all   # 一次收编全部未纳管的 skill，每挪一处都会先问你
+osk list          # 看覆盖矩阵
 ```
 
-已有技能会显示为 `unmanaged`(未纳管)。`osk adopt --all` 可以一次全部收编;
-先用 `--dry-run` 预览,确认无误后也可加 `--yes` 做无人值守上手。你也可以按
-`osk doctor` 给出的命令逐个处理——`osk adopt <路径>` 会把本体移入库中、原位换成
-软链、并链入其余客户端。如果你曾把同一个技能手工复制到两个客户端,一次收编就会
-把它们合而为一(多余副本会移到外置备份,绝不删除)。
+已有的 skill 会标成 `unmanaged`（未纳管）。`osk adopt --all` 能一次全收编：想稳妥就先
+`--dry-run` 看一遍，确认没问题再加 `--yes` 一口气跑完。也可以照 `osk doctor` 给的命令一个个
+来，`osk adopt <路径>` 会把本体移进库里，原地换成软链，再链到其余工具。要是你之前把同一个
+skill 手动复制到了两个工具里，收编一次就把它们并成一份，多出来的那份会挪去备份，不会删。
 
-要求 Python 3.9+。单文件、零依赖、无需构建。
+需要 Python 3.9 以上。一个文件，没有任何依赖，不用编译。
 
-## 平台支持
+## 平台
 
-Linux 和 macOS 是官方支持的目标,每次 push 都由 CI 实测(Python 3.9 与 3.13)。
-**Windows 请用 WSL**——oneskill 靠创建软链工作,而原生 Windows 建软链需要开发者模式
-或管理员权限,安装脚本也是 POSIX shell 脚本。在 WSL 里它就是 Linux,开箱即用。
+支持 Linux 和 macOS，每次提交 CI 都会在这两个平台上各跑一遍（Python 3.9 和 3.13）。
+**Windows 请走 WSL**：oneskill 靠软链工作，而 Windows 原生建软链要开发者模式或管理员
+权限，安装脚本也是 POSIX shell。在 WSL 里它就是个普通的 Linux 程序，装上就能用。
 
-## 一个面向 agent 技能的包管理器
+## 顺带还是个 skill 包管理器
 
-直接从 GitHub 安装技能——一次装进你的所有客户端:
+可以直接从 GitHub 装 skill，一次装进所有工具：
 
 ```bash
 osk install gh:anthropics/skills/skills/skill-creator@main --review
-osk update            # 重新拉取所有远程技能;仅在内容真有变化时升级
-osk uninstall <name>  # 各端断链,本体保留为备份
+osk update            # 重新拉取远程 skill，只有内容真变了才升级
+osk uninstall <name>  # 各端断链，本体留作备份
 ```
 
-下载走 GitHub tarball API,只用 Python 标准库——不需要 `git`。清单会记录每个技能的
-来源、解析到的 commit 和安装时间,`osk list` 会显示锁定的版本号。
+下载走 GitHub 的 tarball 接口，只用到 Python 标准库，连 `git` 都不需要。清单里会记下每个
+skill 的来源、拉到的是哪个 commit、什么时候装的，`osk list` 会显示锁定的版本。
 
-第三方技能就是第三方*提示词*:你的 agent 会照着里面写的做。`--review` 会在安装前
-打印完整的 `SKILL.md`。只从你信任的来源安装。
+第三方 skill 等于第三方提示词，你的 agent 会照着里面写的执行。装之前用 `--review` 把整个
+`SKILL.md` 打出来看清楚，只装你信得过的来源。
 
-## 命令一览
+## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `osk list` | 全客户端覆盖矩阵,`--json` 输出机器可读格式 |
-| `osk doctor` | 检出漂移:断链、被遮蔽的软链、与清单不符。只读——只打印修复命令,绝不代跑 |
-| `osk adopt <路径>` / `osk adopt --all` | 收编一个客户端技能,或一次收编全部未纳管技能 |
+| `osk list` | 全工具覆盖矩阵，加 `--json` 输出机器可读格式 |
+| `osk doctor` | 找出跑偏的地方：断链、被真实目录盖住的软链、和清单对不上。只读，只打印修复命令，绝不代跑 |
+| `osk adopt <路径>` / `osk adopt --all` | 收编某个工具里的一个 skill，或一次收编全部未纳管的 |
 | `osk install <源>` | 从本地目录或 `gh:owner/repo[/子目录][@ref]` 安装 |
-| `osk update [名字]` | 更新一个或全部远程技能 |
-| `osk uninstall <名字>` | 各端断链;本体保留为带时间戳的备份 |
-| `osk sync` | 按清单对账现实,幂等 |
+| `osk update [名字]` | 更新一个或全部远程 skill |
+| `osk uninstall <名字>` | 各端断链，本体留作带时间戳的备份 |
+| `osk sync` | 拿磁盘上的实际情况和清单对账，可重复跑 |
 | `osk scan --write` | 按当前环境生成清单 |
 | `osk init` | 首次配置 |
 
-## 工作原理
+## 原理
 
-一个目录存放所有技能本体,各客户端的 skills 目录里全是指向它的软链。
-清单记录*应有*的状态——于是漂移变成一次 diff,而不是靠猜。
+一个目录放所有 skill 的本体，各工具的 skills 目录里全是指过来的软链。清单记着「本该是什么
+样」，这样有没有跑偏，一对比就知道，不用猜。
 
 ```
   ~/skill-library/pdf-editing/SKILL.md   ← 唯一的真实副本
@@ -104,87 +103,84 @@ osk uninstall <name>  # 各端断链,本体保留为备份
     skills/        skills/       skills/
 ```
 
-## 它从不删除任何东西
+## 它不删东西
 
-管理软链农场意味着要移动真实目录,所以 `oneskill` 把自己设计得毫不吓人:
+管软链免不了要挪真实目录，所以 oneskill 每一步都给你留了退路：
 
-- **每个破坏性步骤都先询问**,并展示涉及的完整路径;
-- **冲突一律改名,绝不删除**。客户端副本会移出各客户端的加载路径,落到
-  `~/.oneskill/backups/<客户端>/<名字>.oneskill-backup-<时间戳>`;库内本体仍在
-  原目录旁保留带时间戳的备份。整个代码库里没有一个 `rmtree`;
-- **处处支持 `--dry-run`**,只打印完整计划,不动任何东西;
-- **失败的操作会回滚**到起点;
-- **`list` 和 `doctor` 严格只读。**
+- 每一步有破坏性的操作，都会先把涉及的完整路径列出来，问过你再动手；
+- 冲突的东西只改名，不删除。工具目录里那份副本，会挪出该工具的加载路径，放到
+  `~/.oneskill/backups/<工具>/` 下带时间戳的位置；库里的本体，则在原地留一份带时间戳的
+  备份。整个代码里没有一处 `rmtree`；
+- `--dry-run` 到处都能加，只打印计划，什么都不动；
+- 操作中途失败，会回滚到动手前的样子；
+- `list` 和 `doctor` 只读，随时跑都安全。
 
-设计准则:糟糕的一天最多让你损失一次重命名,永远不会损失一个文件。
+最坏的情况，也不过是多出一次重命名，绝不会丢文件。
 
 ## 常见问题
 
-**它是自动的吗?会监听我的技能目录吗?**
-不会——这是有意为之。没有守护进程、没有监听器、没有后台任务。你整个技能环境的
-状态永远只差一条 `osk list`,每个修复都是一条现成的命令。如果你本来就在用 AI
-agent 干活,最地道的用法是在 agent 的规则文件(`CLAUDE.md`、`AGENTS.md`……)里加
-一行:*"新建或安装技能后,运行 `osk adopt <路径>`"*——让 agent 替你维护技能库,
-这比任何文件监听器都可靠。
+**它是自动的吗？会盯着我的 skill 目录吗？**
+不会，这是特意这么设计的。没有常驻进程，没有监听，没有后台任务。你整套 skill 的状态，
+一条 `osk list` 随时能看全，每处要修的地方它都给现成的命令。如果你本来就在用 AI agent，
+最顺手的做法是在 agent 的规则文件里（`CLAUDE.md`、`AGENTS.md` 这类）写一句「新建或安装
+skill 之后跑一下 `osk adopt`」，让 agent 顺手替你维护，比任何文件监听都靠谱。
 
-**我的技能已经散落各处,上手有多痛苦?**
-`osk scan --write` 一次盘点全部,接着 `osk adopt --all` 收编所有未纳管技能。不加
-`--yes` 时,每次移动仍会逐项确认。同一技能的多端手工副本会合并为一份共享本体,
-多余副本安全备份到客户端 skills 目录之外。如果你想逐个处理,`osk doctor` 也会按
-技能去重,每个技能只打印一条 `adopt` 命令。
+**我的 skill 已经到处都是了，接进来麻烦吗？**
+`osk scan --write` 一次全盘点出来，`osk adopt --all` 一次全收编。不加 `--yes` 的话，每挪
+一处都会问你。同一个 skill 在几个工具里的手动副本会并成一份，多余的挪到工具目录之外备好。
+想一个个来也行，`osk doctor` 会按 skill 去重，每个只给你一条 `adopt` 命令。
 
-**能加别的客户端吗(Gemini CLI、Copilot CLI……)?**
-能——客户端路径集中在 `bin/osk` 顶部的一个映射结构里。加一条,所有
-scan/list/sync/install 路径自动生效。
+**能加别的工具吗（Gemini CLI、Copilot CLI 这些）？**
+能。工具的路径集中写在 `bin/osk` 顶上的一个映射里，加一条，scan、list、sync、install 就
+全都认了。
 
-**为什么 Claude Code 的插件技能不共享?**
-它们住在带版本号的缓存路径里,插件一升级软链就断;内容也深度绑定 Claude 专有
-工具。`oneskill` 如实把它们标为 `claude-only`,而不是假装能共享。
+**为什么 Claude Code 的插件 skill 不共享？**
+它们放在带版本号的缓存路径里，插件一升级软链就断；内容也跟 Claude 专有的那套东西绑得很
+深。oneskill 干脆如实把它们标成 `claude-only`，不假装能共享。
 
-## 项目状态
+## 现状
 
-年轻,但对此很诚实:安全性质有 35 个离线测试背书,CI 覆盖 Linux/macOS ×
-Python 3.9/3.13——但它目前只在少数环境上跑过。来自第二台机器的 bug 报告
-对我们真的很有价值。
+还年轻。安全这块有 35 个离线测试盯着，CI 在 Linux 和 macOS 上跑 Python 3.9 和 3.13，
+不过目前也就在不多几台机器上用过。要是你在别的环境上碰到问题，欢迎报 bug，对我很有帮助。
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
-已实现:批量收编 `adopt --all`(一条命令完成上手)。路线图:更多客户端支持、以及
-基于 `osk list --json` 的 GUI(JSON 键已稳定,可放心对接)。
+已经做完的：`adopt --all` 批量收编。往后打算做的：支持更多工具，以及一个基于
+`osk list --json` 的图形界面（JSON 字段已经稳定，现在就能照着对接）。
 
-## 参与贡献
+## 参与
 
-欢迎提 issue 和 PR——尤其欢迎来自非作者环境的 bug 报告。如果你要改代码,启用防护
-钩子,让本机的绝对路径永远不会混进提交:
+欢迎提 issue 和 PR，尤其欢迎来自别人机器上的 bug 反馈。要动代码的话，先打开这个防护钩子，
+免得把本机路径带进提交：
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-它会拦截提交 `skills.json`(机器本地状态,可用 `osk scan --write` 重新生成)以及
-暂存内容里任何绝对的 `/home/<用户>` 路径。
+它会拦下 `skills.json`（这是机器本地的东西，`osk scan --write` 能重新生成），以及暂存内容
+里任何形如 `/home/<用户名>` 的绝对路径。
 
 ## 免责声明
 
-oneskill 还很年轻,而且它会移动你客户端技能目录里的真实目录。它被设计成*从不删除*
-——冲突一律改名备份、每个破坏性步骤都先确认、`--dry-run` 可预览一切——但你使用它风险
-自负。谨慎起见,可以先用 `--dry-run`,或把 `ONESKILL_HOME` 指向一个临时目录先看看
-它怎么工作。按"原样"提供,不作任何担保;见 [LICENSE](../LICENSE)。
+oneskill 会去动你各个工具 skill 目录里的真实目录。它是按「不删东西」来设计的：冲突改名
+备份、每步破坏性操作都先确认、哪儿都能 `--dry-run` 预览；即便如此，用它的风险还是由你自己
+承担。想稳妥就先 `--dry-run`，或者把 `ONESKILL_HOME` 指到一个临时目录，先看看它怎么干活。
+软件按原样提供，不含任何担保，详见 [LICENSE](../LICENSE)。
 
 ## 致谢
 
-借助 AI 编程助手构建——Claude Code、Codex CLI、Kimi CLI。这很贴切,因为 oneskill
-存在的意义,正是把这些工具所加载的技能管理得井井有条。
+开发中用到了这几个 AI 编程助手：Claude Code、Codex CLI、Kimi CLI。也算应景，毕竟 oneskill
+要管的，正是这些工具加载的 skill。
 
-## 许可证
+## 许可
 
 [MIT](../LICENSE) © Yuxuan Huang
 
 ---
 
-⭐ 如果 oneskill 帮你揪出了一个悄悄漂移的技能,点个 star 能让更多人发现它。
+⭐ 如果 oneskill 帮你揪出过一个偷偷跑偏的 skill，点个 star，让更多人找到它。
 
 <a href="https://star-history.com/#yxhuang/oneskill&Date">
   <img src="https://api.star-history.com/svg?repos=yxhuang/oneskill&type=Date" width="600" alt="Star History Chart">
