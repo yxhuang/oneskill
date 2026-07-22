@@ -1,6 +1,10 @@
 # oneskill
 
 [![CI](https://github.com/yxhuang/oneskill/actions/workflows/ci.yml/badge.svg)](https://github.com/yxhuang/oneskill/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+![Zero dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/yxhuang/oneskill/pulls)
 
 **一份技能库,喂饱所有 AI 编程 CLI。**
 
@@ -51,6 +55,12 @@ osk list          # 查看覆盖矩阵
 把它们合而为一(多余副本会移到外置备份,绝不删除)。
 
 要求 Python 3.9+。单文件、零依赖、无需构建。
+
+## 平台支持
+
+Linux 和 macOS 是官方支持的目标,每次 push 都由 CI 实测(Python 3.9 与 3.13)。
+**Windows 请用 WSL**——oneskill 靠创建软链工作,而原生 Windows 建软链需要开发者模式
+或管理员权限,安装脚本也是 POSIX shell 脚本。在 WSL 里它就是 Linux,开箱即用。
 
 ## 一个面向 agent 技能的包管理器
 
@@ -144,6 +154,33 @@ python3 -m unittest discover -s tests
 已实现:批量收编 `adopt --all`(一条命令完成上手)。路线图:更多客户端支持、以及
 基于 `osk list --json` 的 GUI(JSON 键已稳定,可放心对接)。
 
+## 参与贡献
+
+欢迎提 issue 和 PR——尤其欢迎来自非作者环境的 bug 报告。如果你要改代码,启用防护
+钩子,让本机的绝对路径永远不会混进提交:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+它会拦截提交 `skills.json`(机器本地状态,可用 `osk scan --write` 重新生成)以及
+暂存内容里任何绝对的 `/home/<用户>` 路径。
+
+## 免责声明
+
+oneskill 还很年轻,而且它会移动你客户端技能目录里的真实目录。它被设计成*从不删除*
+——冲突一律改名备份、每个破坏性步骤都先确认、`--dry-run` 可预览一切——但你使用它风险
+自负。谨慎起见,可以先用 `--dry-run`,或把 `ONESKILL_HOME` 指向一个临时目录先看看
+它怎么工作。按"原样"提供,不作任何担保;见 [LICENSE](../LICENSE)。
+
 ## 许可证
 
-MIT
+[MIT](../LICENSE) © Yuxuan Huang
+
+---
+
+⭐ 如果 oneskill 帮你揪出了一个悄悄漂移的技能,点个 star 能让更多人发现它。
+
+<a href="https://star-history.com/#yxhuang/oneskill&Date">
+  <img src="https://api.star-history.com/svg?repos=yxhuang/oneskill&type=Date" width="600" alt="Star History Chart">
+</a>

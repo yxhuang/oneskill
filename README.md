@@ -1,6 +1,10 @@
 # oneskill
 
 [![CI](https://github.com/yxhuang/oneskill/actions/workflows/ci.yml/badge.svg)](https://github.com/yxhuang/oneskill/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+![Zero dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/yxhuang/oneskill/pulls)
 
 **One skill library. Every AI coding CLI.**
 
@@ -54,6 +58,13 @@ one adoption unifies them (the redundant copy is moved to an external backup, ne
 deleted).
 
 Requires Python 3.9+. A single file, zero dependencies, no build step.
+
+## Platforms
+
+Linux and macOS are the supported targets, both exercised by CI on every push
+(Python 3.9 and 3.13). On **Windows, use WSL** — oneskill works by creating symlinks,
+which on native Windows require Developer Mode or an elevated shell, and the installer is a
+POSIX shell script. Inside WSL it's just Linux and works out of the box.
 
 ## A package manager for agent skills
 
@@ -153,6 +164,34 @@ python3 -m unittest discover -s tests
 Implemented: bulk `adopt --all` for one-pass onboarding. Roadmap: more clients and a GUI
 over `osk list --json` (the JSON keys are stable to build against today).
 
+## Contributing
+
+Issues and PRs are welcome — especially bug reports from a setup that isn't the author's.
+If you hack on it, enable the guard hook so your machine-local paths never land in a commit:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It blocks committing `skills.json` (machine-local, regenerable via `osk scan --write`) and
+any absolute `/home/<user>` path in staged content.
+
+## Disclaimer
+
+oneskill is young, and it moves real directories inside your clients' skill folders. It is
+built to *never delete* — conflicts are renamed and backed up, every destructive step
+confirms, and `--dry-run` previews everything — but you run it at your own risk. If you're
+cautious, start with `--dry-run`, or point `ONESKILL_HOME` at a scratch directory to watch
+it work first. Provided as-is, without warranty; see [LICENSE](LICENSE).
+
 ## License
 
-MIT
+[MIT](LICENSE) © Yuxuan Huang
+
+---
+
+⭐ If oneskill saved you from a silently drifted skill, a star helps more people find it.
+
+<a href="https://star-history.com/#yxhuang/oneskill&Date">
+  <img src="https://api.star-history.com/svg?repos=yxhuang/oneskill&type=Date" width="600" alt="Star History Chart">
+</a>
