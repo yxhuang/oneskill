@@ -173,6 +173,11 @@ oneskill 还很年轻,而且它会移动你客户端技能目录里的真实目�
 自负。谨慎起见,可以先用 `--dry-run`,或把 `ONESKILL_HOME` 指向一个临时目录先看看
 它怎么工作。按"原样"提供,不作任何担保;见 [LICENSE](../LICENSE)。
 
+## 致谢
+
+借助 AI 编程助手构建——Claude Code、Codex CLI、Kimi CLI。这很贴切,因为 oneskill
+存在的意义,正是把这些工具所加载的技能管理得井井有条。
+
 ## 许可证
 
 [MIT](../LICENSE) © Yuxuan Huang

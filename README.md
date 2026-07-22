@@ -184,6 +184,11 @@ confirms, and `--dry-run` previews everything — but you run it at your own ris
 cautious, start with `--dry-run`, or point `ONESKILL_HOME` at a scratch directory to watch
 it work first. Provided as-is, without warranty; see [LICENSE](LICENSE).
 
+## Acknowledgments
+
+Built with the help of AI coding assistants — Claude Code, Codex CLI, and Kimi CLI.
+Fitting, since oneskill exists to keep the skills those very tools load in order.
+
 ## License
 
 [MIT](LICENSE) © Yuxuan Huang
