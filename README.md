@@ -63,6 +63,18 @@ osk list
 
 Requires Python 3.9+. No dependencies, no build step — it's a single file.
 
+### Contributing / self-hosting
+
+If you fork this and push your own manifest around, enable the guard hook so your
+machine-local paths never leak into a commit:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It blocks committing `skills.json` (machine-local, regenerable via `osk scan --write`)
+and any absolute `/home/<user>` path in staged content.
+
 ## Commands
 
 | Command | What it does |

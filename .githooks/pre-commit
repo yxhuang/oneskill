@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# oneskill pre-commit guard — keeps machine-local state and personal paths
+# out of the public repository. Install once with:
+#
+#     git config core.hooksPath .githooks
+#
+# It blocks two things in staged changes:
+#   1. the machine-local manifest (skills.json), which must stay gitignored
+#   2. absolute home paths like /home/<user> or /Users/<user> in file content
+#
+# Override for a single commit (rarely needed) with:  git commit --no-verify
+
+set -euo pipefail
+
+fail=0
+
+# --- 1. never commit the local manifest -------------------------------------
+if git diff --cached --name-only | grep -qx 'skills.json'; then
+    echo "✗ pre-commit: skills.json is machine-local state and must not be committed."
+    echo "  It is regenerable with 'osk scan --write'. Unstage it:"
+    echo "      git restore --staged skills.json"
+    fail=1
+fi
+
+# --- 2. never commit absolute personal home paths ---------------------------
+# Scan only added/changed lines of staged text blobs.
+leaks=$(git diff --cached --unified=0 --no-color 2>/dev/null \
+    | grep -E '^\+' \
+    | grep -vE '^\+\+\+' \
+    | grep -oE '(/home/[a-zA-Z0-9._-]+|/Users/[a-zA-Z0-9._-]+)' \
+    | grep -vE '^/home/you($|/)|^/Users/you($|/)' \
+    | sort -u || true)
+
+if [ -n "$leaks" ]; then
+    echo "✗ pre-commit: staged content contains absolute personal home paths:"
+    echo "$leaks" | sed 's/^/      /'
+    echo "  Use a placeholder like /home/you/... or \$HOME instead."
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo ""
+    echo "Commit aborted. Fix the above, or bypass with 'git commit --no-verify'."
+    exit 1
+fi
