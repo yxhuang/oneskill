@@ -1,5 +1,7 @@
 # oneskill
 
+[![CI](https://github.com/yxhuang/oneskill/actions/workflows/ci.yml/badge.svg)](https://github.com/yxhuang/oneskill/actions/workflows/ci.yml)
+
 **One skill library. Every AI coding CLI.**
 
 Claude Code, Codex CLI, and Kimi CLI can all load *skills* — folders containing a `SKILL.md`
@@ -10,29 +12,10 @@ copies quietly drift apart until you can't remember which one you actually fixed
 `oneskill` keeps one canonical copy of every skill and symlinks it into every client. A single
 command shows you what's shared, what's client-specific, and what's broken.
 
-```
-$ osk list
-
-skill                  source    scope        claude      codex     kimi
-─────────────────────  ────────  ───────────  ──────────  ────────  ────────
-
-SHARED (all three clients)
-──────────────────────────────────────────────────────────────────────────
-pdf-editing            self      shared       ✓ linked    ✓ linked  ✓ linked
-refine-prompt          self      shared       ✓ linked    ✓ linked  ✓ linked
-stock-data             vendor    shared       ✓ linked    ✓ linked  ✓ linked
-
-CLIENT-SPECIFIC
-──────────────────────────────────────────────────────────────────────────
-superpowers            plugin    claude-only  ✓ plugin    —         —
-mail-organizer         self      codex-only   —           ✓ linked  —
-
-NEEDS ATTENTION
-──────────────────────────────────────────────────────────────────────────
-officecli              external  shared       ! real dir  ✓ linked  ✓ linked
-
-42 skills · 33 shared across all clients · 1 issue
-```
+<p align="center">
+  <img src="docs/demo.svg" width="720"
+       alt="osk list output: a coverage matrix grouping skills into SHARED across all three clients, CLIENT-SPECIFIC, and NEEDS ATTENTION — where one skill shows a real directory shadowing its symlink on Claude.">
+</p>
 
 That last row is the whole point. A client upgrade replaced a symlink with a real directory,
 so Claude is now running a private copy that no longer tracks the library. You'd never notice
@@ -51,11 +34,24 @@ or sees a stale copy of it.
 
 ## Install
 
-```bash
-git clone https://github.com/yxhuang/oneskill.git
-cd oneskill
-ln -s "$PWD/bin/osk" ~/.local/bin/osk    # anywhere on your PATH
+Install or update with one command:
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/yxhuang/oneskill/main/install.sh | sh
+```
+
+This installs the repository to `~/.local/share/oneskill` and links `osk` into
+`~/.local/bin`. To install manually instead:
+
+```bash
+git clone https://github.com/yxhuang/oneskill.git ~/.local/share/oneskill
+mkdir -p ~/.local/bin
+ln -sfn ~/.local/share/oneskill/bin/osk ~/.local/bin/osk
+```
+
+Then initialize your skill library:
+
+```bash
 osk init          # pick where your skill library lives
 osk scan --write  # build a manifest from what's already installed
 osk list

@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="792" height="523" viewBox="0 0 792 523" font-family="ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace">
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="24" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect x="6" y="4" width="780" height="511" rx="13" fill="#14171e" stroke="#2a2f3a" stroke-width="1" filter="url(#shadow)"/>
+  <path d="M6 17 a13 13 0 0 1 13 -13 h754 a13 13 0 0 1 13 13 v29 h-780 z" fill="#191d25"/>
+  <line x1="6" y1="50" x2="786" y2="50" stroke="#232833" stroke-width="1"/>
+  <circle cx="30" cy="25" r="5.5" fill="#39404c"/>
+  <circle cx="50" cy="25" r="5.5" fill="#39404c"/>
+  <circle cx="70" cy="25" r="5.5" fill="#39404c"/>
+  <text x="96" y="30" fill="#8b95f2" font-size="12.5" font-weight="600">oneskill</text>
+  <text x="170" y="30" fill="#6a7280" font-size="12.5">— coverage matrix</text>
+<text x="28" y="76" fill="#8b95f2" font-size="14" font-weight="700" text-anchor="start">$</text>
+<text x="44" y="76" fill="#dfe4ec" font-size="14" font-weight="600" text-anchor="start">osk list</text>
+<text x="28" y="107" fill="#6a7280" font-size="12.5" font-weight="400" text-anchor="start" letter-spacing="0.3">skill</text>
+<text x="214" y="107" fill="#6a7280" font-size="12.5" font-weight="400" text-anchor="start" letter-spacing="0.3">source</text>
+<text x="306" y="107" fill="#6a7280" font-size="12.5" font-weight="400" text-anchor="start" letter-spacing="0.3">scope</text>
+<text x="436" y="107" fill="#6a7280" font-size="12.5" font-weight="400" text-anchor="start" letter-spacing="0.3">claude</text>
+<text x="566" y="107" fill="#6a7280" font-size="12.5" font-weight="400" text-anchor="start" letter-spacing="0.3">codex</text>
+<text x="676" y="107" fill="#6a7280" font-size="12.5" font-weight="400" text-anchor="start" letter-spacing="0.3">kimi</text>
+<line x1="28" y1="117" x2="764" y2="117" stroke="#232833" stroke-width="1"/>
+<text x="28" y="144" fill="#9aa4b2" font-size="11.5" font-weight="600" text-anchor="start" letter-spacing="1.4">SHARED  ·  ALL THREE CLIENTS</text>
+<line x1="28" y1="153" x2="764" y2="153" stroke="#232833" stroke-width="1"/>
+<text x="28" y="176" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">doc-writer</text>
+<text x="214" y="176" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">self</text>
+<text x="306" y="176" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">shared</text>
+<text x="436" y="176" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="452" y="176" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="566" y="176" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="176" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="176" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="176" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="28" y="199" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">pdf-editing</text>
+<text x="214" y="199" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">self</text>
+<text x="306" y="199" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">shared</text>
+<text x="436" y="199" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="452" y="199" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="566" y="199" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="199" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="199" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="199" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="28" y="222" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">refine-prompt</text>
+<text x="214" y="222" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">self</text>
+<text x="306" y="222" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">shared</text>
+<text x="436" y="222" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="452" y="222" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="566" y="222" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="222" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="222" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="222" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="28" y="245" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">stock-data</text>
+<text x="214" y="245" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">vendor</text>
+<text x="306" y="245" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">shared</text>
+<text x="436" y="245" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="452" y="245" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="566" y="245" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="245" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="245" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="245" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="28" y="268" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">web-search</text>
+<text x="214" y="268" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">self</text>
+<text x="306" y="268" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">shared</text>
+<text x="436" y="268" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="452" y="268" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="566" y="268" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="268" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="268" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="268" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="28" y="305" fill="#9aa4b2" font-size="11.5" font-weight="600" text-anchor="start" letter-spacing="1.4">CLIENT-SPECIFIC</text>
+<line x1="28" y1="314" x2="764" y2="314" stroke="#232833" stroke-width="1"/>
+<text x="28" y="337" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">superpowers</text>
+<text x="214" y="337" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">plugin</text>
+<text x="306" y="337" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">claude-only</text>
+<text x="436" y="337" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="452" y="337" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">plugin</text>
+<text x="566" y="337" fill="#464c57" font-size="14" font-weight="400" text-anchor="start">—</text>
+<text x="676" y="337" fill="#464c57" font-size="14" font-weight="400" text-anchor="start">—</text>
+<text x="28" y="360" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">mail-organizer</text>
+<text x="214" y="360" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">self</text>
+<text x="306" y="360" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">codex-only</text>
+<text x="436" y="360" fill="#464c57" font-size="14" font-weight="400" text-anchor="start">—</text>
+<text x="566" y="360" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="360" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="360" fill="#464c57" font-size="14" font-weight="400" text-anchor="start">—</text>
+<text x="28" y="383" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">kimi-helper</text>
+<text x="214" y="383" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">self</text>
+<text x="306" y="383" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">kimi-only</text>
+<text x="436" y="383" fill="#464c57" font-size="14" font-weight="400" text-anchor="start">—</text>
+<text x="566" y="383" fill="#464c57" font-size="14" font-weight="400" text-anchor="start">—</text>
+<text x="676" y="383" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="383" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="28" y="420" fill="#9aa4b2" font-size="11.5" font-weight="600" text-anchor="start" letter-spacing="1.4">NEEDS ATTENTION</text>
+<line x1="28" y1="429" x2="764" y2="429" stroke="#232833" stroke-width="1"/>
+<text x="28" y="452" fill="#dfe4ec" font-size="14" font-weight="400" text-anchor="start">officecli</text>
+<text x="214" y="452" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">external</text>
+<text x="306" y="452" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">shared</text>
+<text x="436" y="452" fill="#e6b450" font-size="14" font-weight="700" text-anchor="start">!</text>
+<text x="452" y="452" fill="#e6b450" font-size="14" font-weight="400" text-anchor="start" opacity="0.85">real dir</text>
+<text x="566" y="452" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="582" y="452" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<text x="676" y="452" fill="#5ec98a" font-size="14" font-weight="600" text-anchor="start">✓</text>
+<text x="692" y="452" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">linked</text>
+<rect x="14" y="437" width="2.5" height="32" rx="1.25" fill="#e6b450" opacity="0.9"/>
+<line x1="28" y1="474" x2="764" y2="474" stroke="#232833" stroke-width="1"/>
+<text x="28" y="495" fill="#dfe4ec" font-size="14" font-weight="600" text-anchor="start">9 skills</text>
+<text x="106" y="495" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">·</text>
+<text x="124" y="495" fill="#5ec98a" font-size="14" font-weight="700" text-anchor="start">5</text>
+<text x="138" y="495" fill="#9aa4b2" font-size="14" font-weight="400" text-anchor="start">shared across all clients</text>
+<text x="342" y="495" fill="#6a7280" font-size="14" font-weight="400" text-anchor="start">·</text>
+<text x="360" y="495" fill="#e6b450" font-size="14" font-weight="700" text-anchor="start">1 issue</text>
+</svg>
