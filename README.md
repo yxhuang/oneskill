@@ -188,7 +188,7 @@ is apt, given that oneskill's whole job is keeping the skills those tools load i
 
 ## License
 
-[MIT](LICENSE) © Yuxuan Huang
+Released under the [MIT License](LICENSE).
 
 ---
 

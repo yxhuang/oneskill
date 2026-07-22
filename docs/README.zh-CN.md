@@ -176,7 +176,7 @@ oneskill 会去动你各个工具 skill 目录里的真实目录。它是按「�
 
 ## 许可
 
-[MIT](../LICENSE) © Yuxuan Huang
+基于 [MIT 许可证](../LICENSE)发布。
 
 ---
 
