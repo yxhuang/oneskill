@@ -1,30 +1,43 @@
 #!/usr/bin/env python3
-"""oneskill v1: audit and reconcile skills shared by Claude, Codex and Kimi."""
+"""oneskill: audit and manage skills shared by Claude, Codex and Kimi."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
+import tarfile
 import tempfile
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
-CLIENTS = ("claude", "codex", "kimi")
-CLIENT_DIRS = {
+CLIENTS = {
     "claude": (".claude", "skills"),
     "codex": (".codex", "skills"),
     "kimi": (".kimi-code", "skills"),
 }
-SOURCES = {"self", "vendor", "external", "plugin"}
-MANIFEST_VERSION = 1
+SOURCES = {"self", "vendor", "external", "plugin", "remote"}
+MANIFEST_VERSION = 2
+SUPPORTED_MANIFEST_VERSIONS = {1, MANIFEST_VERSION}
+SAFE_SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+GITHUB_SOURCE = re.compile(
+    r"^gh:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"(?P<rest>(?:/[^@]+)?)(?:@(?P<ref>.+))?$"
+)
+USER_AGENT = "oneskill/2 (+https://github.com/yxhuang/oneskill)"
 PENDING_REVIEW = "needs review: single-client skill, confirm if intentional"
 UNMANAGED_REVIEW = "not in the shared library yet; run `osk adopt` to bring it under management"
 CONFIG_DIR_PARTS = (".config", "oneskill")
@@ -75,7 +88,7 @@ def config() -> dict[str, Path]:
         "library": Path(library).expanduser().absolute(),
         "manifest": Path(manifest).expanduser().absolute(),
     }
-    for client, parts in CLIENT_DIRS.items():
+    for client, parts in CLIENTS.items():
         result[client] = home.joinpath(*parts)
     return result
 
@@ -114,7 +127,7 @@ def within(path: Path, parent: Path) -> bool:
 
 def scope_clients(scope: Any) -> tuple[str, ...]:
     if scope == "shared":
-        return CLIENTS
+        return tuple(CLIENTS)
     if not isinstance(scope, list) or not scope:
         raise OneskillError("scope must be 'shared' or a non-empty list of client names")
     invalid = [item for item in scope if item not in CLIENTS]
@@ -151,6 +164,17 @@ def validate_entry(entry: Any) -> dict[str, Any]:
     scope_clients(entry["scope"])
     if entry["source"] == "plugin" and scope_clients(entry["scope"]) != ("claude",):
         raise OneskillError(f"plugin {name} must be scoped to claude only")
+    description = entry.get("description")
+    if description is not None and (not isinstance(description, str) or not description.strip()):
+        raise OneskillError(f"{name}: description must be a non-empty string")
+    provenance = entry.get("provenance")
+    if provenance is not None:
+        if not isinstance(provenance, dict):
+            raise OneskillError(f"{name}: provenance must be an object")
+        for key in ("source_url", "ref", "installed_at"):
+            value = provenance.get(key)
+            if not isinstance(value, str) or not value:
+                raise OneskillError(f"{name}: provenance.{key} must be a non-empty string")
     return dict(entry)
 
 
@@ -163,8 +187,9 @@ def read_manifest(path: Path, allow_missing: bool = False) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise OneskillError(f"cannot read manifest {path}: {exc}") from exc
-    if not isinstance(data, dict) or data.get("version") != MANIFEST_VERSION:
-        raise OneskillError(f"manifest version must be {MANIFEST_VERSION}")
+    if not isinstance(data, dict) or data.get("version") not in SUPPORTED_MANIFEST_VERSIONS:
+        versions = ", ".join(str(item) for item in sorted(SUPPORTED_MANIFEST_VERSIONS))
+        raise OneskillError(f"manifest version must be one of: {versions}")
     if not isinstance(data.get("skills"), list):
         raise OneskillError("manifest is missing the skills array")
     entries = [validate_entry(item) for item in data["skills"]]
@@ -195,6 +220,8 @@ def write_manifest(path: Path, data: dict[str, Any]) -> None:
 
 
 def infer_source(body: Path, cfg: dict[str, Path]) -> str:
+    if within(body, cfg["library"] / "remote"):
+        return "remote"
     if within(body, cfg["library"] / "vendor"):
         return "vendor"
     if within(body, cfg["library"]):
@@ -204,6 +231,200 @@ def infer_source(body: Path, cfg: dict[str, Path]) -> str:
     if within(body, cfg["home"] / ".claude" / "plugins"):
         return "plugin"
     return "external"
+
+
+def installed_at_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def parse_frontmatter_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = value[1:-1]
+        return decoded if isinstance(decoded, str) else str(decoded)
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def read_skill_metadata(skill_dir: Path) -> dict[str, str]:
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.is_file():
+        raise OneskillError(f"skill directory must contain SKILL.md: {skill_dir}")
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise OneskillError(f"cannot read {skill_file}: {exc}") from exc
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise OneskillError(f"{skill_file}: YAML frontmatter is required")
+    try:
+        end = next(index for index in range(1, len(lines)) if lines[index].strip() == "---")
+    except StopIteration as exc:
+        raise OneskillError(f"{skill_file}: YAML frontmatter is not closed") from exc
+    metadata: dict[str, str] = {}
+    index = 1
+    while index < end:
+        line = lines[index]
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:\s*(.*))?$", line)
+        if not match:
+            index += 1
+            continue
+        key, raw = match.group(1), (match.group(2) or "")
+        if raw.strip() in {"|", "|-", "|+", ">", ">-", ">+"}:
+            folded = raw.strip().startswith(">")
+            block: list[str] = []
+            index += 1
+            while index < end and (not lines[index].strip() or lines[index][0].isspace()):
+                block.append(lines[index].lstrip())
+                index += 1
+            metadata[key] = (" " if folded else "\n").join(block).strip()
+            continue
+        metadata[key] = parse_frontmatter_scalar(raw)
+        index += 1
+    for key in ("name", "description"):
+        if not metadata.get(key, "").strip():
+            raise OneskillError(f"{skill_file}: YAML frontmatter must contain non-empty {key}")
+    return {"name": metadata["name"].strip(), "description": metadata["description"].strip()}
+
+
+def validate_remote_skill_name(name: str) -> None:
+    if not SAFE_SKILL_NAME.fullmatch(name):
+        raise OneskillError(
+            f"unsafe skill name {name!r}; use only letters, digits, dot, underscore, and hyphen"
+        )
+
+
+def parse_github_source(source: str) -> tuple[str, str, str | None, str | None]:
+    match = GITHUB_SOURCE.fullmatch(source)
+    if not match:
+        raise OneskillError("GitHub source must look like gh:owner/repo[/subdir][@ref]")
+    owner, repo = match.group("owner"), match.group("repo")
+    rest = match.group("rest") or ""
+    subdir = rest[1:] if rest.startswith("/") else None
+    ref = match.group("ref")
+    if subdir:
+        parts = Path(subdir).parts
+        if Path(subdir).is_absolute() or any(part in {"", ".", ".."} for part in parts):
+            raise OneskillError(f"unsafe GitHub subdirectory: {subdir!r}")
+    if ref is not None and not ref.strip():
+        raise OneskillError("GitHub ref must not be empty")
+    return owner, repo, subdir, ref
+
+
+def download_url(url: str, destination: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    except (OSError, urllib.error.URLError) as exc:
+        raise OneskillError(f"download failed for {url}: {exc}") from exc
+
+
+def extract_safe_tar(archive: Path, destination: Path) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = tarfile.open(archive, mode="r:*")
+    except (OSError, tarfile.TarError) as exc:
+        raise OneskillError(f"cannot open source archive {archive}: {exc}") from exc
+    with handle:
+        for member in handle.getmembers():
+            member_path = Path(member.name)
+            if member_path.is_absolute() or any(part == ".." for part in member_path.parts):
+                raise OneskillError(f"unsafe path in source archive: {member.name}")
+            target = destination / member_path
+            if not within(target, destination):
+                raise OneskillError(f"archive member escapes extraction directory: {member.name}")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise OneskillError(f"unsupported link or special file in source archive: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source_file = handle.extractfile(member)
+            if source_file is None:
+                raise OneskillError(f"cannot read archive member: {member.name}")
+            with source_file, target.open("wb") as output:
+                shutil.copyfileobj(source_file, output)
+            os.chmod(target, member.mode & 0o777)
+    roots = [item for item in destination.iterdir() if item.name not in {"pax_global_header"}]
+    if len(roots) != 1 or not roots[0].is_dir():
+        raise OneskillError("source archive must contain exactly one top-level directory")
+    return roots[0]
+
+
+def archive_commit_ref(root: Path) -> str | None:
+    match = re.search(r"-([0-9a-fA-F]{7,40})$", root.name)
+    return match.group(1).lower()[:12] if match else None
+
+
+@contextmanager
+def materialize_skill_source(source: str) -> Iterator[dict[str, Any]]:
+    """Resolve a directory, local tarball, or gh: source to a local skill directory."""
+    if source.startswith("gh:"):
+        owner, repo, subdir, requested_ref = parse_github_source(source)
+        base = f"https://api.github.com/repos/{owner}/{repo}/tarball"
+        if requested_ref:
+            base += "/" + urllib.parse.quote(requested_ref, safe="")
+        with tempfile.TemporaryDirectory(prefix="oneskill-source-", dir="/tmp") as temporary:
+            temporary_path = Path(temporary)
+            archive = temporary_path / "source.tar.gz"
+            download_url(base, archive)
+            root = extract_safe_tar(archive, temporary_path / "unpacked")
+            commit_ref = archive_commit_ref(root)
+            if commit_ref is None:
+                raise OneskillError("GitHub archive did not expose a commit SHA in its top-level directory")
+            skill_dir = root / subdir if subdir else root
+            yield {"directory": skill_dir, "ref": commit_ref, "source_url": source}
+        return
+
+    local = Path(source).expanduser().absolute()
+    if local.is_dir():
+        yield {"directory": local, "ref": "local", "source_url": str(local)}
+        return
+    if local.is_file() and (local.name.endswith(".tar.gz") or local.suffix == ".tgz"):
+        with tempfile.TemporaryDirectory(prefix="oneskill-source-", dir="/tmp") as temporary:
+            root = extract_safe_tar(local, Path(temporary) / "unpacked")
+            yield {
+                "directory": root,
+                "ref": archive_commit_ref(root) or "local",
+                "source_url": str(local),
+            }
+        return
+    raise OneskillError(f"source is neither a skill directory nor a supported gh: source: {source}")
+
+
+def tree_snapshot(root: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            snapshot[relative] = "link:" + os.readlink(path)
+        elif path.is_dir():
+            snapshot[relative + "/"] = "directory"
+        elif path.is_file():
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            snapshot[relative] = "file:" + digest.hexdigest()
+    return snapshot
+
+
+def compare_skill_trees(old: Path, new: Path) -> dict[str, list[str]]:
+    old_snapshot = tree_snapshot(old)
+    new_snapshot = tree_snapshot(new)
+    old_names, new_names = set(old_snapshot), set(new_snapshot)
+    return {
+        "added": sorted(new_names - old_names),
+        "removed": sorted(old_names - new_names),
+        "modified": sorted(
+            name for name in old_names & new_names if old_snapshot[name] != new_snapshot[name]
+        ),
+    }
 
 
 def visible_entries(directory: Path) -> dict[str, Path]:
@@ -258,6 +479,15 @@ def scan_plugins(cfg: dict[str, Path], occupied: set[str]) -> list[dict[str, Any
 
 
 def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
+    previous_remote: dict[str, dict[str, Any]] = {}
+    if cfg["manifest"].is_file():
+        try:
+            previous = read_manifest(cfg["manifest"])
+        except OneskillError:
+            previous = {"skills": []}
+        previous_remote = {
+            item["name"]: item for item in previous["skills"] if item["source"] == "remote"
+        }
     per_client = {client: visible_entries(cfg[client]) for client in CLIENTS}
     names = sorted(set().union(*(set(items) for items in per_client.values())))
     skills: list[dict[str, Any]] = []
@@ -285,6 +515,15 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
             "body": str(body) if body is not None else None,
             "scope": scope,
         }
+        old_remote = previous_remote.get(name)
+        if (
+            entry["source"] == "remote"
+            and old_remote is not None
+            and old_remote.get("body") == entry["body"]
+        ):
+            for key in ("description", "provenance"):
+                if key in old_remote:
+                    entry[key] = old_remote[key]
         if body is None:
             entry["review"] = UNMANAGED_REVIEW
         elif len(present) == 1:
@@ -351,7 +590,9 @@ def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str,
                     "state": "plugin" if plugin_ok else "plugin_missing",
                     "detail": "plugin installed" if plugin_ok else "plugin body missing",
                 }
-                for client in ("codex", "kimi"):
+                for client in CLIENTS:
+                    if client == "claude":
+                        continue
                     clients[client] = {
                         "path": str(cfg[client] / name),
                         "expected": False,
@@ -451,9 +692,12 @@ def pad(text: str, width: int) -> str:
 
 
 def table_cells(row: dict[str, Any]) -> tuple[str, ...]:
+    provenance = row.get("provenance")
+    ref = provenance.get("ref", "—") if isinstance(provenance, dict) else "—"
     return (
         row["name"],
         row["source"],
+        ref,
         scope_label(row["scope"]),
         *(STATE_MARKS[row["clients"][client]["state"]] for client in CLIENTS),
     )
@@ -464,7 +708,7 @@ def has_anomaly(row: dict[str, Any]) -> bool:
 
 
 def render_table(inventory: dict[str, Any]) -> None:
-    headers = ("skill", "source", "scope", "claude", "codex", "kimi")
+    headers = ("skill", "source", "ref", "scope", *CLIENTS)
     shared: list[dict[str, Any]] = []
     specific: list[dict[str, Any]] = []
     attention: list[dict[str, Any]] = []
@@ -480,7 +724,7 @@ def render_table(inventory: dict[str, Any]) -> None:
     shared.sort(key=lambda row: row["name"].casefold())
     specific.sort(
         key=lambda row: (
-            CLIENTS.index(scope_clients(row["scope"])[0])
+            tuple(CLIENTS).index(scope_clients(row["scope"])[0])
             if row["scope"] != "shared"
             else len(CLIENTS),
             row["name"].casefold(),
@@ -685,6 +929,293 @@ def rollback_adopt(
         source, target = moved
         if path_exists(target) and not path_exists(source):
             shutil.move(str(target), str(source))
+
+
+def remote_entry(name: str, description: str, target: Path, resolved: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "source": "remote",
+        "body": str(target),
+        "scope": "shared",
+        "description": description,
+        "provenance": {
+            "source_url": resolved["source_url"],
+            "ref": resolved["ref"],
+            "installed_at": installed_at_now(),
+        },
+    }
+
+
+def remote_body_for_entry(entry: dict[str, Any], cfg: dict[str, Path]) -> Path:
+    expected = cfg["library"] / "remote" / entry["name"]
+    raw_body = entry.get("body")
+    if not isinstance(raw_body, str) or normalized(Path(raw_body)) != normalized(expected):
+        raise OneskillError(
+            f"remote skill {entry['name']} has an unsafe or unexpected body path: {raw_body!r}"
+        )
+    return expected
+
+
+def rollback_remote_change(
+    target: Path,
+    body_backup: Path | None,
+    target_replaced: bool,
+    created_links: list[Path],
+    path_backups: list[tuple[Path, Path]],
+    replaced_links: list[tuple[Path, str]],
+) -> None:
+    for path in reversed(created_links):
+        if path.is_symlink():
+            path.unlink()
+    for path, raw_target in reversed(replaced_links):
+        if path.is_symlink():
+            path.unlink()
+        if not path_exists(path):
+            path.symlink_to(raw_target, target_is_directory=True)
+    for original, backup in reversed(path_backups):
+        if original.is_symlink():
+            original.unlink()
+        if not path_exists(original) and path_exists(backup):
+            os.replace(backup, original)
+    if target_replaced and path_exists(target):
+        failed_backup = unique_backup(target)
+        os.replace(target, failed_backup)
+    if body_backup is not None and path_exists(body_backup) and not path_exists(target):
+        os.replace(body_backup, target)
+
+
+def command_install(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    manifest = read_manifest(cfg["manifest"], allow_missing=True)
+    with materialize_skill_source(args.source) as resolved:
+        source_dir = Path(resolved["directory"])
+        metadata = read_skill_metadata(source_dir)
+        name, description = metadata["name"], metadata["description"]
+        validate_remote_skill_name(name)
+        target = cfg["library"] / "remote" / name
+        if within(source_dir, target) or within(target, source_dir):
+            raise OneskillError("source directory and installation target must not contain one another")
+
+        print(f"Source: {resolved['source_url']}")
+        print(f"Name: {name}")
+        print(f"Description: {description}")
+        if args.review:
+            skill_text = (source_dir / "SKILL.md").read_text(encoding="utf-8")
+            print(f"\n===== BEGIN SKILL.md: {name} =====")
+            print(skill_text, end="" if skill_text.endswith("\n") else "\n")
+            print(f"===== END SKILL.md: {name} =====\n")
+
+        existing_entry = next((item for item in manifest["skills"] if item["name"] == name), None)
+        body_backup = unique_backup(target) if path_exists(target) else None
+        actions: list[dict[str, Any]] = []
+        for client in CLIENTS:
+            destination = cfg[client] / name
+            if destination.is_symlink() and link_target(destination) == normalized(target):
+                continue
+            if destination.is_symlink():
+                actions.append(
+                    {"kind": "replace_link", "path": destination, "raw_target": os.readlink(destination)}
+                )
+            elif path_exists(destination):
+                actions.append(
+                    {"kind": "replace_real", "path": destination, "backup": unique_backup(destination)}
+                )
+            else:
+                actions.append({"kind": "create", "path": destination})
+
+        confirmations = [f"install {name} into {target} and link it into all clients"]
+        if body_backup is not None:
+            confirmations.append(f"move existing body {target} -> {body_backup}")
+        if existing_entry is not None:
+            confirmations.append(f"replace existing manifest entry for {name}")
+        for action in actions:
+            if action["kind"] == "replace_real":
+                confirmations.append(
+                    f"move conflicting item {action['path']} -> {action['backup']}"
+                )
+            elif action["kind"] == "replace_link":
+                confirmations.append(f"replace conflicting symlink {action['path']} -> {target}")
+        for description_text in confirmations:
+            if not confirm(description_text, args.yes, args.dry_run):
+                print("Declined; no changes were made.")
+                return 1
+        for action in actions:
+            if action["kind"] == "create":
+                print(f"About to: create symlink {action['path']} -> {target}")
+        print(f"About to: update manifest {cfg['manifest']}")
+        if args.dry_run:
+            print("dry-run complete: no changes made.")
+            return 0
+
+        created_links: list[Path] = []
+        path_backups: list[tuple[Path, Path]] = []
+        replaced_links: list[tuple[Path, str]] = []
+        body_moved = False
+        target_replaced = body_backup is None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if body_backup is not None:
+                os.replace(target, body_backup)
+                body_moved = True
+                target_replaced = True
+            shutil.copytree(source_dir, target, symlinks=True)
+            for action in actions:
+                destination = action["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if action["kind"] == "replace_real":
+                    os.replace(destination, action["backup"])
+                    path_backups.append((destination, action["backup"]))
+                elif action["kind"] == "replace_link":
+                    destination.unlink()
+                    replaced_links.append((destination, action["raw_target"]))
+                destination.symlink_to(target, target_is_directory=True)
+                created_links.append(destination)
+            replacement = remote_entry(name, description, target, resolved)
+            if existing_entry is None:
+                manifest["skills"].append(replacement)
+            else:
+                manifest["skills"][manifest["skills"].index(existing_entry)] = replacement
+            write_manifest(cfg["manifest"], manifest)
+        except Exception as exc:
+            rollback_remote_change(
+                target,
+                body_backup if body_moved else None,
+                target_replaced,
+                created_links,
+                path_backups,
+                replaced_links,
+            )
+            raise OneskillError(f"installation failed; rolled back as far as possible: {exc}") from exc
+    print(f"installed: {name}")
+    return 0
+
+
+def render_change_summary(name: str, changes: dict[str, list[str]]) -> None:
+    print(f"Changes for {name}:")
+    for kind in ("added", "removed", "modified"):
+        for path in changes[kind]:
+            print(f"  {kind}: {path}")
+
+
+def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    manifest = read_manifest(cfg["manifest"])
+    remotes = [item for item in manifest["skills"] if item["source"] == "remote"]
+    if args.name:
+        remotes = [item for item in remotes if item["name"] == args.name]
+        if not remotes:
+            raise OneskillError(f"remote skill not found: {args.name}")
+    if not remotes:
+        print("No remote skills to update.")
+        return 0
+
+    for entry in remotes:
+        name = entry["name"]
+        provenance = entry.get("provenance")
+        if not isinstance(provenance, dict) or not isinstance(provenance.get("source_url"), str):
+            raise OneskillError(f"remote skill {name} has no source_url provenance")
+        target = remote_body_for_entry(entry, cfg)
+        if not target.is_dir() or target.is_symlink():
+            raise OneskillError(f"remote skill body is missing or not a real directory: {target}")
+        with materialize_skill_source(provenance["source_url"]) as resolved:
+            source_dir = Path(resolved["directory"])
+            metadata = read_skill_metadata(source_dir)
+            validate_remote_skill_name(metadata["name"])
+            if metadata["name"] != name:
+                raise OneskillError(
+                    f"updated source declares skill name {metadata['name']!r}, expected {name!r}"
+                )
+            changes = compare_skill_trees(target, source_dir)
+            if not any(changes.values()):
+                print(f"{name}: already up to date")
+                continue
+            render_change_summary(name, changes)
+            backup = unique_backup(target)
+            if not confirm(
+                f"move current body {target} -> {backup}, install the update, and refresh the manifest",
+                args.yes,
+                args.dry_run,
+            ):
+                print(f"Declined; {name} was not changed.")
+                continue
+            if args.dry_run:
+                print(f"dry-run complete for {name}: no changes made.")
+                continue
+            body_moved = False
+            target_replaced = False
+            try:
+                os.replace(target, backup)
+                body_moved = True
+                target_replaced = True
+                shutil.copytree(source_dir, target, symlinks=True)
+                entry["description"] = metadata["description"]
+                entry["provenance"] = {
+                    "source_url": resolved["source_url"],
+                    "ref": resolved["ref"],
+                    "installed_at": installed_at_now(),
+                }
+                write_manifest(cfg["manifest"], manifest)
+            except Exception as exc:
+                rollback_remote_change(
+                    target,
+                    backup if body_moved else None,
+                    target_replaced,
+                    [],
+                    [],
+                    [],
+                )
+                raise OneskillError(f"update of {name} failed; rolled back as far as possible: {exc}") from exc
+            print(f"updated: {name}")
+    return 0
+
+
+def command_uninstall(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    manifest = read_manifest(cfg["manifest"])
+    entry = next((item for item in manifest["skills"] if item["name"] == args.name), None)
+    if entry is None or entry["source"] != "remote":
+        raise OneskillError(f"remote skill not found: {args.name}")
+    target = remote_body_for_entry(entry, cfg)
+    if not target.is_dir() or target.is_symlink():
+        raise OneskillError(f"remote skill body is missing or not a real directory: {target}")
+    links: list[tuple[Path, str]] = []
+    for client in CLIENTS:
+        path = cfg[client] / args.name
+        if path.is_symlink() and link_target(path) == normalized(target):
+            links.append((path, os.readlink(path)))
+    backup = unique_backup(target)
+    confirmations = [f"unlink {path} (the skill body remains intact)" for path, _ in links]
+    confirmations.extend(
+        [
+            f"move skill body {target} -> {backup}",
+            f"remove {args.name} from manifest {cfg['manifest']}",
+        ]
+    )
+    for description in confirmations:
+        if not confirm(description, args.yes, args.dry_run):
+            print("Declined; no changes were made.")
+            return 1
+    if args.dry_run:
+        print("dry-run complete: no changes made.")
+        return 0
+
+    unlinked: list[tuple[Path, str]] = []
+    body_moved = False
+    try:
+        for path, raw_target in links:
+            path.unlink()
+            unlinked.append((path, raw_target))
+        os.replace(target, backup)
+        body_moved = True
+        manifest["skills"].remove(entry)
+        write_manifest(cfg["manifest"], manifest)
+    except Exception as exc:
+        if body_moved and path_exists(backup) and not path_exists(target):
+            os.replace(backup, target)
+        for path, raw_target in unlinked:
+            if not path_exists(path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(raw_target, target_is_directory=True)
+        raise OneskillError(f"uninstall failed; rolled back as far as possible: {exc}") from exc
+    print(f"uninstalled: {args.name}; body preserved at {backup}")
+    return 0
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -954,7 +1485,7 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="osk", description="Audit and reconcile skills shared across Claude, Codex and Kimi")
-    parser.add_argument("--version", action="version", version="osk 1.0.0")
+    parser.add_argument("--version", action="version", version="osk 2.0.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="interactive first-time setup; writes ~/.config/oneskill/config.json")
@@ -983,6 +1514,28 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser = subparsers.add_parser("sync", help="idempotently create links and reconcile against the manifest")
     sync_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
     sync_parser.add_argument("--yes", action="store_true", help="auto-confirm replacement of drifted items")
+
+    install_parser = subparsers.add_parser(
+        "install", help="install a skill directory or gh:owner/repo[/subdir][@ref] source"
+    )
+    install_parser.add_argument("source", help="local skill directory or gh: GitHub source")
+    install_parser.add_argument(
+        "--review", action="store_true", help="print the complete SKILL.md before confirmation"
+    )
+    install_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
+    install_parser.add_argument("--yes", action="store_true", help="auto-confirm all actions")
+
+    update_parser = subparsers.add_parser(
+        "update", help="update one remote skill, or every remote skill when name is omitted"
+    )
+    update_parser.add_argument("name", nargs="?", help="remote skill name")
+    update_parser.add_argument("--dry-run", action="store_true", help="print changes only")
+    update_parser.add_argument("--yes", action="store_true", help="auto-confirm all updates")
+
+    uninstall_parser = subparsers.add_parser("uninstall", help="safely uninstall a remote skill")
+    uninstall_parser.add_argument("name", help="remote skill name")
+    uninstall_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
+    uninstall_parser.add_argument("--yes", action="store_true", help="auto-confirm all actions")
     return parser
 
 
@@ -993,7 +1546,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             return command_init(args)
         cfg = config()
-        if args.command in {"list", "doctor", "scan", "sync"}:
+        if args.command in {"list", "doctor", "scan", "sync", "install", "update", "uninstall"}:
             require_library(cfg)
         if args.command == "scan":
             draft = scan_environment(cfg)
@@ -1024,6 +1577,12 @@ def main(argv: list[str] | None = None) -> int:
             return command_adopt(args, cfg)
         if args.command == "sync":
             return command_sync(args, cfg)
+        if args.command == "install":
+            return command_install(args, cfg)
+        if args.command == "update":
+            return command_update(args, cfg)
+        if args.command == "uninstall":
+            return command_uninstall(args, cfg)
         parser.error("unknown command")
     except OneskillError as exc:
         if getattr(args, "json", False):

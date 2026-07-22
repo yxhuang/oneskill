@@ -77,6 +77,9 @@ and any absolute `/home/<user>` path in staged content.
 |---|---|
 | `osk list` | Coverage matrix across all clients. Add `--json` for machine output. |
 | `osk doctor` | Find drift: broken links, real directories shadowing links, manifest mismatches. Read-only — it prints fix commands, it never runs them. |
+| `osk install <source>` | Install a local skill directory or `gh:owner/repo[/subdir][@ref]` source into the shared remote library. |
+| `osk update [name]` | Update one remote skill, or all remote skills when no name is given. |
+| `osk uninstall <name>` | Unlink a remote skill and preserve its body as a timestamped backup. |
 | `osk adopt <path>` | Take a skill that exists in one client and share it with the rest. |
 | `osk sync` | Reconcile reality against the manifest. Idempotent — a second run is always a no-op. |
 | `osk scan --write` | Generate a manifest draft from your current setup. |
@@ -98,6 +101,22 @@ into it. A manifest records what *should* exist, so drift becomes a diff rather 
 moves the body into the library, replaces the original with a symlink, and links it into the
 others.
 
+## Installing skill packages
+
+Install a skill from a local directory or GitHub repository path:
+
+```bash
+osk install ./my-skill --review
+osk install gh:owner/repo/path/to/skill@main --review
+osk update                 # update every remotely installed skill
+osk update my-skill        # update one skill
+osk uninstall my-skill
+```
+
+GitHub downloads use the repository tarball API and Python's standard library; `oneskill`
+does not shell out to Git. Remote bodies live under the library's `remote/` directory, and
+the manifest records their original source, resolved commit ref, and installation time.
+
 ## It never deletes anything
 
 Managing symlink farms means moving real directories around, so `oneskill` is built to be
@@ -106,11 +125,17 @@ un-scary:
 - **Every destructive step asks first**, one at a time, showing the exact paths involved.
 - **Conflicts are renamed, never removed.** Anything in the way becomes
   `<name>.oneskill-backup-<timestamp>`. There is no `rmtree` anywhere in the codebase.
-- **`--dry-run` on `adopt` and `sync`** prints the full plan and changes nothing.
-- **Failed operations roll back** — a half-finished `adopt` restores what it moved.
+- **`--dry-run` on `install`, `update`, `uninstall`, `adopt`, and `sync`** prints the full plan
+  and changes nothing.
+- **Failed operations roll back** — half-finished installs, updates, uninstalls, and adopts
+  restore what they moved.
 - **`list` and `doctor` are strictly read-only**, safe to run anywhere, any time.
 
 The design rule is that a bad day should cost you a rename, never a file.
+
+Third-party skills are third-party prompts: your agent will treat their contents as
+instructions. Use `--review` before installing, read the complete `SKILL.md`, and install only
+from sources you trust.
 
 ## Supported clients
 
@@ -122,12 +147,13 @@ Claude Code *plugin* skills are deliberately not shared: they live in versioned 
 that break on every plugin update, and their content is bound to Claude-specific tooling.
 `oneskill` reports them as `claude-only` rather than pretending otherwise.
 
-Adding another client is a few lines — client paths are declared in one place near the top of
-`bin/osk`.
+Adding another client, such as Gemini CLI or Copilot CLI, means adding one entry to the
+`CLIENTS` mapping near the top of `bin/osk`; every scan, list, sync, install, update, and
+uninstall path reads that single structure.
 
 ## Status
 
-v1, and honest about it: this scratches a real itch on the author's machine and the safety
+v2, and honest about it: this scratches a real itch on the author's machine and the safety
 properties are covered by tests, but it has run on exactly one setup so far. Bug reports from
 a second machine would be genuinely useful.
 
@@ -135,8 +161,8 @@ a second machine would be genuinely useful.
 python3 -m unittest discover -s tests
 ```
 
-Roadmap — a GUI over `osk list --json`, and support for more clients. The JSON output is
-stable enough to build against today.
+Roadmap — a GUI over `osk list --json`, and support for more clients. The JSON output keeps
+its original keys and adds remote provenance for package-manager integrations.
 
 ## License
 

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shlex
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +97,22 @@ class OneskillIntegrationTest(unittest.TestCase):
                 {"name": "broken", "source": "self", "body": str(broken_expected), "scope": "shared"},
             ]
         )
+
+    def remote_fixture(
+        self, name: str = "remote-demo", description: str = "A remote test skill."
+    ) -> Path:
+        fixture = self.base / "fixtures" / name
+        fixture.mkdir(parents=True)
+        (fixture / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+        (fixture / "payload.txt").write_text("version one\n", encoding="utf-8")
+        return fixture
+
+    def install_remote(self, fixture: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+        self.agent.mkdir(parents=True, exist_ok=True)
+        return self.run_osk("install", str(fixture), "--yes", *extra)
 
     def test_list_covers_healthy_missing_shadow_and_broken(self) -> None:
         self.build_audit_fixture()
@@ -304,6 +322,204 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertEqual(tokens[:2], ["ln", "-s"])
         self.assertNotEqual(tokens[2], tokens[3])
         self.assertEqual(Path(tokens[2]), body)
+
+    def test_install_local_directory_links_all_clients_and_records_provenance(self) -> None:
+        fixture = self.remote_fixture()
+        result = self.install_remote(fixture, "--review")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("BEGIN SKILL.md", result.stdout)
+        installed = self.agent / "remote" / "remote-demo"
+        self.assertEqual((installed / "payload.txt").read_text(encoding="utf-8"), "version one\n")
+        for client in CLIENT_PATHS:
+            link = self.client_path(client, "remote-demo")
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), installed.resolve())
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(payload["version"], 2)
+        entry = payload["skills"][0]
+        self.assertEqual(entry["source"], "remote")
+        self.assertEqual(entry["scope"], "shared")
+        self.assertEqual(entry["provenance"]["source_url"], str(fixture))
+        self.assertEqual(entry["provenance"]["ref"], "local")
+        self.assertTrue(entry["provenance"]["installed_at"])
+        listing = self.run_osk("list")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn("ref", listing.stdout.splitlines()[0])
+        self.assertIn("local", listing.stdout)
+        json_listing = json.loads(self.run_osk("list", "--json").stdout)
+        row = json_listing["skills"][0]
+        for old_key in ("name", "source", "body", "scope", "clients"):
+            self.assertIn(old_key, row)
+        self.assertIn("provenance", row)
+
+    def test_install_local_tar_gz_fixture(self) -> None:
+        source = self.remote_fixture(name="archive-skill")
+        archive = self.base / "archive-skill.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            handle.add(source, arcname="owner-repo-abcdef123456")
+        self.agent.mkdir(parents=True)
+        result = self.run_osk("install", str(archive), "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        entry = json.loads(self.manifest.read_text(encoding="utf-8"))["skills"][0]
+        self.assertEqual(entry["name"], "archive-skill")
+        self.assertEqual(entry["provenance"]["ref"], "abcdef123456")
+
+    def test_install_rejects_tar_path_traversal(self) -> None:
+        archive = self.base / "unsafe.tar.gz"
+        content = b"escape attempt\n"
+        with tarfile.open(archive, "w:gz") as handle:
+            member = tarfile.TarInfo("../escaped.txt")
+            member.size = len(content)
+            handle.addfile(member, io.BytesIO(content))
+        self.agent.mkdir(parents=True)
+        result = self.run_osk("install", str(archive), "--yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsafe path in source archive", result.stderr)
+        self.assertFalse(self.manifest.exists())
+
+    def test_install_dry_run_changes_nothing(self) -> None:
+        fixture = self.remote_fixture(name="install-preview")
+        self.agent.mkdir(parents=True)
+        result = self.run_osk("install", str(fixture), "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("no changes made", result.stdout)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse((self.agent / "remote").exists())
+        for client in CLIENT_PATHS:
+            self.assertFalse(os.path.lexists(self.client_path(client, "install-preview")))
+
+    def test_install_conflicts_are_backed_up_after_confirmation(self) -> None:
+        fixture = self.remote_fixture(name="collision")
+        target = self.agent / "remote" / "collision"
+        target.mkdir(parents=True)
+        (target / "old.txt").write_text("old body", encoding="utf-8")
+        conflict = self.client_path("claude", "collision")
+        conflict.mkdir()
+        (conflict / "local.txt").write_text("local copy", encoding="utf-8")
+        self.write_manifest([])
+        result = self.run_osk("install", str(fixture), "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        body_backups = list(target.parent.glob("collision.oneskill-backup-*"))
+        client_backups = list(conflict.parent.glob("collision.oneskill-backup-*"))
+        self.assertEqual(len(body_backups), 1)
+        self.assertEqual((body_backups[0] / "old.txt").read_text(), "old body")
+        self.assertEqual(len(client_backups), 1)
+        self.assertEqual((client_backups[0] / "local.txt").read_text(), "local copy")
+        self.assertTrue(conflict.is_symlink())
+
+    def test_install_conflict_refusal_changes_nothing(self) -> None:
+        fixture = self.remote_fixture(name="refused")
+        target = self.agent / "remote" / "refused"
+        target.mkdir(parents=True)
+        marker = target / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        self.write_manifest([])
+        before = self.manifest.read_bytes()
+        result = self.run_osk("install", str(fixture), input_text="n\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no changes were made", result.stdout)
+        self.assertEqual(marker.read_text(), "keep")
+        self.assertEqual(self.manifest.read_bytes(), before)
+        self.assertEqual(list(target.parent.glob("refused.oneskill-backup-*")), [])
+
+    def test_install_validation_failures_make_no_changes(self) -> None:
+        self.agent.mkdir(parents=True)
+        missing = self.base / "missing-skill"
+        missing.mkdir()
+        missing_result = self.run_osk("install", str(missing), "--yes")
+        self.assertEqual(missing_result.returncode, 2)
+        self.assertIn("must contain SKILL.md", missing_result.stderr)
+        no_name = self.base / "no-name"
+        no_name.mkdir()
+        (no_name / "SKILL.md").write_text(
+            "---\ndescription: Missing its name.\n---\n", encoding="utf-8"
+        )
+        no_name_result = self.run_osk("install", str(no_name), "--yes")
+        self.assertEqual(no_name_result.returncode, 2)
+        self.assertIn("non-empty name", no_name_result.stderr)
+        self.assertFalse(self.manifest.exists())
+        self.assertEqual(list(self.agent.iterdir()), [])
+
+    def test_update_no_changes_is_a_noop(self) -> None:
+        fixture = self.remote_fixture(name="unchanged")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "unchanged"
+        manifest_before = self.manifest.read_bytes()
+        inode_before = target.stat().st_ino
+        result = self.run_osk("update", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("already up to date", result.stdout)
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(target.stat().st_ino, inode_before)
+        self.assertEqual(list(target.parent.glob("unchanged.oneskill-backup-*")), [])
+
+    def test_update_dry_run_changes_nothing(self) -> None:
+        fixture = self.remote_fixture(name="preview-update")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "preview-update"
+        manifest_before = self.manifest.read_bytes()
+        (fixture / "payload.txt").write_text("preview only\n", encoding="utf-8")
+        result = self.run_osk("update", "preview-update", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("modified: payload.txt", result.stdout)
+        self.assertEqual((target / "payload.txt").read_text(), "version one\n")
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(list(target.parent.glob("preview-update.oneskill-backup-*")), [])
+
+    def test_update_changed_body_preserves_old_version_as_backup(self) -> None:
+        fixture = self.remote_fixture(name="upgrade-me")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "upgrade-me"
+        links_before = {
+            client: os.readlink(self.client_path(client, "upgrade-me"))
+            for client in CLIENT_PATHS
+        }
+        (fixture / "payload.txt").write_text("version two\n", encoding="utf-8")
+        (fixture / "new.txt").write_text("added\n", encoding="utf-8")
+        result = self.run_osk("update", "upgrade-me", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("added: new.txt", result.stdout)
+        self.assertIn("modified: payload.txt", result.stdout)
+        self.assertEqual((target / "payload.txt").read_text(), "version two\n")
+        backups = list(target.parent.glob("upgrade-me.oneskill-backup-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "payload.txt").read_text(), "version one\n")
+        for client, raw_target in links_before.items():
+            self.assertEqual(os.readlink(self.client_path(client, "upgrade-me")), raw_target)
+
+    def test_uninstall_unlinks_clients_backs_up_body_and_removes_manifest_entry(self) -> None:
+        fixture = self.remote_fixture(name="remove-me")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "remove-me"
+        result = self.run_osk("uninstall", "remove-me", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(target.exists())
+        backups = list(target.parent.glob("remove-me.oneskill-backup-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertTrue((backups[0] / "SKILL.md").is_file())
+        for client in CLIENT_PATHS:
+            self.assertFalse(os.path.lexists(self.client_path(client, "remove-me")))
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["skills"], [])
+
+    def test_uninstall_dry_run_changes_nothing(self) -> None:
+        fixture = self.remote_fixture(name="keep-me")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "keep-me"
+        manifest_before = self.manifest.read_bytes()
+        result = self.run_osk("uninstall", "keep-me", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("no changes made", result.stdout)
+        self.assertTrue(target.is_dir())
+        for client in CLIENT_PATHS:
+            self.assertTrue(self.client_path(client, "keep-me").is_symlink())
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(list(target.parent.glob("keep-me.oneskill-backup-*")), [])
 
 
 class OneskillConfigTest(unittest.TestCase):
