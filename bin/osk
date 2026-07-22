@@ -369,7 +369,7 @@ def materialize_skill_source(source: str) -> Iterator[dict[str, Any]]:
         base = f"https://api.github.com/repos/{owner}/{repo}/tarball"
         if requested_ref:
             base += "/" + urllib.parse.quote(requested_ref, safe="")
-        with tempfile.TemporaryDirectory(prefix="oneskill-source-", dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory(prefix="oneskill-source-") as temporary:
             temporary_path = Path(temporary)
             archive = temporary_path / "source.tar.gz"
             download_url(base, archive)
@@ -386,7 +386,7 @@ def materialize_skill_source(source: str) -> Iterator[dict[str, Any]]:
         yield {"directory": local, "ref": "local", "source_url": str(local)}
         return
     if local.is_file() and (local.name.endswith(".tar.gz") or local.suffix == ".tgz"):
-        with tempfile.TemporaryDirectory(prefix="oneskill-source-", dir="/tmp") as temporary:
+        with tempfile.TemporaryDirectory(prefix="oneskill-source-") as temporary:
             root = extract_safe_tar(local, Path(temporary) / "unpacked")
             yield {
                 "directory": root,
