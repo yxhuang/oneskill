@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
+__version__ = "0.3.0"
+
 CLIENTS = {
     "claude": (".claude", "skills"),
     "codex": (".codex", "skills"),
@@ -37,11 +39,13 @@ GITHUB_SOURCE = re.compile(
     r"^gh:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
     r"(?P<rest>(?:/[^@]+)?)(?:@(?P<ref>.+))?$"
 )
-USER_AGENT = "oneskill/2 (+https://github.com/yxhuang/oneskill)"
+USER_AGENT = f"oneskill/{__version__} (+https://github.com/yxhuang/oneskill)"
 PENDING_REVIEW = "needs review: single-client skill, confirm if intentional"
 UNMANAGED_REVIEW = "not in the shared library yet; run `osk adopt` to bring it under management"
 CONFIG_DIR_PARTS = (".config", "oneskill")
 DEFAULT_LIBRARY_PARTS = (".oneskill", "library")
+AGENTS_LIBRARY_PARTS = (".agents", "skills")
+NETWORK_TIMEOUT = 15
 
 
 class OneskillError(Exception):
@@ -219,6 +223,36 @@ def write_manifest(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
+def update_cache_path(cfg: dict[str, Path]) -> Path:
+    return cfg["manifest"].parent / "update-cache.json"
+
+
+def read_update_cache(cfg: dict[str, Path]) -> dict[str, Any]:
+    path = update_cache_path(cfg)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def apply_update_cache(inventory: dict[str, Any], cache: dict[str, Any]) -> None:
+    cached = cache.get("skills")
+    if not isinstance(cached, dict):
+        cached = {}
+    for row in inventory["skills"]:
+        if row.get("source") != "remote":
+            continue
+        entry = cached.get(row["name"])
+        row["update_available"] = bool(isinstance(entry, dict) and entry.get("update_available"))
+    if isinstance(cache.get("checked_at"), str):
+        inventory["update_checked_at"] = cache["checked_at"]
+
+
 def infer_source(body: Path, cfg: dict[str, Path]) -> str:
     if within(body, cfg["library"] / "remote"):
         return "remote"
@@ -322,6 +356,37 @@ def download_url(url: str, destination: Path) -> None:
             shutil.copyfileobj(response, output)
     except (OSError, urllib.error.URLError) as exc:
         raise OneskillError(f"download failed for {url}: {exc}") from exc
+
+
+def http_get_json(url: str) -> Any:
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if url.startswith("https://api.github.com/"):
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
+        if exc.code == 403 and remaining == "0":
+            when = ""
+            reset = exc.headers.get("X-RateLimit-Reset")
+            if reset and reset.isdigit():
+                stamp = datetime.fromtimestamp(int(reset)).astimezone()
+                when = f"; the limit resets at {stamp.strftime('%Y-%m-%d %H:%M:%S %Z').strip()}"
+            raise OneskillError(
+                "GitHub anonymous API rate limit exceeded (60 requests/hour)"
+                f"{when}; set the GITHUB_TOKEN environment variable for a higher quota"
+            ) from exc
+        raise OneskillError(f"request failed for {url}: HTTP {exc.code} {exc.reason}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise OneskillError(f"request failed for {url}: {exc}") from exc
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OneskillError(f"invalid JSON response from {url}: {exc}") from exc
 
 
 def extract_safe_tar(archive: Path, destination: Path) -> Path:
@@ -694,6 +759,8 @@ def pad(text: str, width: int) -> str:
 def table_cells(row: dict[str, Any]) -> tuple[str, ...]:
     provenance = row.get("provenance")
     ref = provenance.get("ref", "—") if isinstance(provenance, dict) else "—"
+    if row.get("update_available"):
+        ref = f"{ref} ↑"
     return (
         row["name"],
         row["source"],
@@ -760,6 +827,9 @@ def render_table(inventory: dict[str, Any]) -> None:
         f"{summary['three_client_healthy']} shared across all clients · "
         f"{anomalies} issue{'s' if anomalies != 1 else ''}"
     )
+    if any(row.get("update_available") for row in inventory["skills"]):
+        checked = inventory.get("update_checked_at", "an unknown time")
+        print(f"↑ = update available (as of {checked}); run `osk outdated` to refresh")
 
 
 def shell_join(*parts: Path | str) -> str:
@@ -1272,7 +1342,9 @@ def command_uninstall(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
 def command_init(args: argparse.Namespace) -> int:
     home = Path(os.environ.get("ONESKILL_HOME", str(Path.home()))).expanduser().absolute()
     config_path = config_file_path(home)
-    default_library = home.joinpath(*DEFAULT_LIBRARY_PARTS)
+    agents_library = home.joinpath(*AGENTS_LIBRARY_PARTS)
+    agents_available = agents_library.is_dir()
+    default_library = agents_library if agents_available else home.joinpath(*DEFAULT_LIBRARY_PARTS)
     default_manifest = home.joinpath(*CONFIG_DIR_PARTS, "skills.json")
 
     if config_path.is_file():
@@ -1298,6 +1370,10 @@ def command_init(args: argparse.Namespace) -> int:
 
     library = default_library
     if not args.yes:
+        if agents_available:
+            print(f"found community-shared skills directory: {agents_library}")
+            print("  (~/.agents/skills is the community convention shared by AI coding tools)")
+            print(f"  press enter to use it, or type another path, e.g. {home.joinpath(*DEFAULT_LIBRARY_PARTS)}")
         try:
             answer = input(f"Skill library directory [{default_library}]: ").strip()
         except EOFError:
@@ -1578,9 +1654,199 @@ def command_sync(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
     return 1 if unresolved else 0
 
 
+def github_latest_ref(owner: str, repo: str, subdir: str | None, branch: str | None) -> str:
+    query = {"per_page": "1"}
+    if branch:
+        query["sha"] = branch
+    if subdir:
+        query["path"] = subdir
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits?{urllib.parse.urlencode(query)}"
+    data = http_get_json(url)
+    if (
+        not isinstance(data, list)
+        or not data
+        or not isinstance(data[0], dict)
+        or not isinstance(data[0].get("sha"), str)
+        or not data[0]["sha"]
+    ):
+        raise OneskillError(f"unexpected GitHub commits response for {owner}/{repo}")
+    return data[0]["sha"]
+
+
+def command_outdated(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    manifest = read_manifest(cfg["manifest"])
+    remotes = [item for item in manifest["skills"] if item["source"] == "remote"]
+    if args.name:
+        remotes = [item for item in remotes if item["name"] == args.name]
+        if not remotes:
+            raise OneskillError(f"remote skill not found: {args.name}")
+    if not remotes:
+        print("No remote skills to check.")
+        return 0
+
+    checked_at = installed_at_now()
+    results: list[dict[str, Any]] = []
+    for entry in remotes:
+        name = entry["name"]
+        provenance = entry.get("provenance")
+        if not isinstance(provenance, dict) or not isinstance(provenance.get("source_url"), str):
+            raise OneskillError(f"remote skill {name} has no source_url provenance")
+        source_url = provenance["source_url"]
+        if not source_url.startswith("gh:"):
+            print(f"{name}: skipped (not a gh: source)")
+            continue
+        pinned = provenance.get("ref", "")
+        owner, repo, subdir, branch = parse_github_source(source_url)
+        latest = github_latest_ref(owner, repo, subdir, branch)
+        results.append(
+            {
+                "name": name,
+                "pinned_ref": pinned,
+                "latest_ref": latest,
+                "update_available": bool(pinned) and latest[: len(pinned)] != pinned,
+            }
+        )
+    if not results:
+        print("No gh:-sourced remote skills to check.")
+        return 0
+
+    cache_payload = {
+        "checked_at": checked_at,
+        "skills": {
+            item["name"]: {
+                "pinned_ref": item["pinned_ref"],
+                "latest_ref": item["latest_ref"],
+                "update_available": item["update_available"],
+                "checked_at": checked_at,
+            }
+            for item in results
+        },
+    }
+    cache_path = update_cache_path(cfg)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(cache_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        raise OneskillError(f"cannot write update cache {cache_path}: {exc}") from exc
+
+    updates = sum(item["update_available"] for item in results)
+    if args.json:
+        json.dump(
+            {"checked_at": checked_at, "skills": results, "updates_available": updates},
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        print()
+        return 0
+
+    headers = ("skill", "pinned", "latest", "status")
+    rows = [
+        (
+            item["name"],
+            item["pinned_ref"][:12],
+            item["latest_ref"][:12],
+            "update available" if item["update_available"] else "up to date",
+        )
+        for item in results
+    ]
+    widths = [display_width(header) for header in headers]
+    for row in rows:
+        widths = [max(width, display_width(cell)) for width, cell in zip(widths, row)]
+    print("  ".join(pad(header, width) for header, width in zip(headers, widths)))
+    print("  ".join("─" * width for width in widths))
+    for row in rows:
+        print("  ".join(pad(cell, width) for cell, width in zip(row, widths)))
+    total = len(results)
+    print(
+        f"\n{total} remote skill{'s' if total != 1 else ''} · "
+        f"{updates} update{'s' if updates != 1 else ''} available"
+    )
+    if updates:
+        print("run `osk update <name>` to apply an update")
+    return 0
+
+
+def format_installs(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+def command_search(args: argparse.Namespace) -> int:
+    query = args.query.strip()
+    if not query:
+        raise OneskillError("search query must not be empty")
+    if args.limit < 1:
+        raise OneskillError("--limit must be a positive integer")
+    url = "https://skills.sh/api/search?q=" + urllib.parse.quote(query)
+    data = http_get_json(url)
+    if not isinstance(data, dict) or not isinstance(data.get("skills"), list):
+        raise OneskillError("unexpected response from skills.sh: missing the skills array")
+    results: list[dict[str, Any]] = []
+    skipped = 0
+    for item in data["skills"][: args.limit]:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        name, source, skill_id = item.get("name"), item.get("source"), item.get("skillId")
+        installs = item.get("installs")
+        if (
+            not all(isinstance(value, str) and value for value in (name, source, skill_id))
+            or not isinstance(installs, int)
+            or isinstance(installs, bool)
+        ):
+            skipped += 1
+            continue
+        results.append(
+            {
+                "name": name,
+                "source": source,
+                "installs": installs,
+                "install": f"gh:{source}/{skill_id}@main",
+            }
+        )
+    if args.json:
+        json.dump(
+            {"query": query, "results": results, "skipped": skipped},
+            sys.stdout,
+            ensure_ascii=False,
+            indent=2,
+        )
+        print()
+        return 0
+    if not results:
+        raise OneskillError("skills.sh returned no usable entries")
+    headers = ("name", "source", "installs", "install source")
+    rows = [
+        (item["name"], item["source"], format_installs(item["installs"]), item["install"])
+        for item in results
+    ]
+    widths = [display_width(header) for header in headers]
+    for row in rows:
+        widths = [max(width, display_width(cell)) for width, cell in zip(widths, row)]
+    print("  ".join(pad(header, width) for header, width in zip(headers, widths)))
+    print("  ".join("─" * width for width in widths))
+    for row in rows:
+        print("  ".join(pad(cell, width) for cell, width in zip(row, widths)))
+    if skipped:
+        entry_word = "entry" if skipped == 1 else "entries"
+        print(f"\nskipped {skipped} malformed {entry_word} from skills.sh")
+    print(
+        "\nnote: skills.sh ids are not guaranteed to match the real subdirectory inside the"
+        " repository; confirm with `osk install <source> --dry-run --review` and adjust the"
+        " subdirectory if needed"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="osk", description="Audit and reconcile skills shared across Claude, Codex and Kimi")
-    parser.add_argument("--version", action="version", version="osk 2.0.0")
+    parser.add_argument("--version", "-V", action="version", version=f"oneskill {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="interactive first-time setup; writes ~/.config/oneskill/config.json")
@@ -1638,6 +1904,19 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_parser.add_argument("name", help="remote skill name")
     uninstall_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
     uninstall_parser.add_argument("--yes", action="store_true", help="auto-confirm all actions")
+
+    outdated_parser = subparsers.add_parser(
+        "outdated", help="check remote skills for updates via the GitHub API (read-only, no downloads)"
+    )
+    outdated_parser.add_argument("name", nargs="?", help="remote skill name")
+    outdated_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    search_parser = subparsers.add_parser("search", help="search the skills.sh public registry")
+    search_parser.add_argument("query", help="search keywords")
+    search_parser.add_argument(
+        "--limit", type=int, default=20, help="maximum results to show (default: 20)"
+    )
+    search_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
 
 
@@ -1661,6 +1940,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "list":
             inventory = build_inventory(cfg, read_manifest(cfg["manifest"]))
+            apply_update_cache(inventory, read_update_cache(cfg))
             if args.json:
                 json.dump(inventory, sys.stdout, ensure_ascii=False, indent=2)
                 print()
@@ -1685,6 +1965,10 @@ def main(argv: list[str] | None = None) -> int:
             return command_update(args, cfg)
         if args.command == "uninstall":
             return command_uninstall(args, cfg)
+        if args.command == "outdated":
+            return command_outdated(args, cfg)
+        if args.command == "search":
+            return command_search(args)
         parser.error("unknown command")
     except OneskillError as exc:
         if getattr(args, "json", False):

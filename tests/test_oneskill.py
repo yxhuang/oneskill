@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -779,6 +780,257 @@ class OneskillConfigTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("left unchanged", result.stdout)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+
+    def test_init_yes_prefers_existing_agents_skills_directory(self) -> None:
+        agents = self.home / ".agents" / "skills"
+        agents.mkdir(parents=True)
+        result = self.run_osk("init", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["library"], str(agents))
+
+    def test_init_interactive_enter_accepts_agents_recommendation(self) -> None:
+        agents = self.home / ".agents" / "skills"
+        agents.mkdir(parents=True)
+        result = self.run_osk("init", input_text="\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("community-shared", result.stdout)
+        self.assertIn(str(self.home / ".oneskill" / "library"), result.stdout)
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["library"], str(agents))
+
+    def test_init_interactive_default_without_agents_directory(self) -> None:
+        result = self.run_osk("init", input_text="\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("community-shared", result.stdout)
+        payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["library"], str(self.home / ".oneskill" / "library"))
+
+    def test_version_flag(self) -> None:
+        for flag in ("--version", "-V"):
+            result = self.run_osk(flag)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "oneskill 0.3.0")
+
+
+class OneskillNetworkTest(unittest.TestCase):
+    """outdated/search tests; all network access is mocked, fixtures live under /tmp."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="oneskill-net-test-", dir="/tmp")
+        self.base = Path(self.temporary.name)
+        self.home = self.base / "home"
+        self.library = self.base / "library"
+        self.manifest = self.base / "skills.json"
+        for parts in CLIENT_PATHS.values():
+            self.home.joinpath(*parts).mkdir(parents=True)
+        self.library.mkdir(parents=True)
+        self.env = os.environ.copy()
+        self.env.pop("GITHUB_TOKEN", None)
+        self.env.update(
+            ONESKILL_HOME=str(self.home),
+            ONESKILL_LIBRARY=str(self.library),
+            ONESKILL_MANIFEST=str(self.manifest),
+        )
+        self.osk = load_osk_module()
+        self.cfg = {
+            "home": self.home,
+            "library": self.library,
+            "manifest": self.manifest,
+            **{
+                client: self.home.joinpath(*parts)
+                for client, parts in CLIENT_PATHS.items()
+            },
+        }
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_remote_manifest(
+        self, ref: str = "abc123def456", source_url: str = "gh:owner/repo/skills/demo@main"
+    ) -> Path:
+        body = self.library / "remote" / "demo"
+        body.mkdir(parents=True)
+        (body / "SKILL.md").write_text("# demo\n", encoding="utf-8")
+        self.manifest.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "skills": [
+                        {
+                            "name": "demo",
+                            "source": "remote",
+                            "body": str(body),
+                            "scope": "shared",
+                            "description": "A demo skill.",
+                            "provenance": {
+                                "source_url": source_url,
+                                "ref": ref,
+                                "installed_at": "2026-01-01T00:00:00+00:00",
+                            },
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return body
+
+    def run_outdated(self, payload: object, json_mode: bool = False) -> tuple[int, str]:
+        args = SimpleNamespace(name=None, json=json_mode)
+        with mock.patch.object(self.osk, "http_get_json", return_value=payload):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = self.osk.command_outdated(args, self.cfg)
+        return code, out.getvalue()
+
+    def test_outdated_reports_up_to_date(self) -> None:
+        self.write_remote_manifest()
+        code, out = self.run_outdated([{"sha": "abc123def4567890aaaa"}])
+        self.assertEqual(code, 0)
+        self.assertIn("up to date", out)
+        self.assertIn("1 remote skill · 0 updates available", out)
+        cache = json.loads((self.base / "update-cache.json").read_text(encoding="utf-8"))
+        entry = cache["skills"]["demo"]
+        self.assertEqual(entry["latest_ref"], "abc123def4567890aaaa")
+        self.assertFalse(entry["update_available"])
+        self.assertTrue(entry["checked_at"])
+
+    def test_outdated_reports_update_available(self) -> None:
+        self.write_remote_manifest()
+        code, out = self.run_outdated([{"sha": "fff000111222333444"}])
+        self.assertEqual(code, 0)
+        self.assertIn("update available", out)
+        self.assertIn("1 remote skill · 1 update available", out)
+        self.assertIn("osk update <name>", out)
+        cache = json.loads((self.base / "update-cache.json").read_text(encoding="utf-8"))
+        self.assertTrue(cache["skills"]["demo"]["update_available"])
+
+    def test_outdated_rate_limit_message(self) -> None:
+        self.write_remote_manifest()
+
+        def raise_403(request: object, timeout: int = 0) -> None:
+            raise urllib.error.HTTPError(
+                "https://api.github.com/repos/owner/repo/commits",
+                403,
+                "Forbidden",
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1893456000"},
+                None,
+            )
+
+        with mock.patch("urllib.request.urlopen", side_effect=raise_403):
+            with self.assertRaises(self.osk.OneskillError) as context:
+                self.osk.command_outdated(SimpleNamespace(name=None, json=False), self.cfg)
+        message = str(context.exception)
+        self.assertIn("rate limit", message)
+        self.assertIn("GITHUB_TOKEN", message)
+        self.assertFalse((self.base / "update-cache.json").exists())
+
+    def test_list_marks_cached_updates_without_network(self) -> None:
+        body = self.write_remote_manifest()
+        code, _ = self.run_outdated([{"sha": "fff000111222333444"}])
+        self.assertEqual(code, 0)
+        for client in CLIENT_PATHS:
+            self.home.joinpath(*CLIENT_PATHS[client], "demo").symlink_to(
+                body, target_is_directory=True
+            )
+
+        def no_network(request: object, timeout: int = 0) -> None:
+            raise AssertionError("osk list must not touch the network")
+
+        with mock.patch.dict(os.environ, self.env):
+            with mock.patch("urllib.request.urlopen", side_effect=no_network):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = self.osk.main(["list"])
+                self.assertEqual(code, 0)
+                text = out.getvalue()
+                self.assertIn("abc123def456 ↑", text)
+                self.assertIn("↑ = update available (as of ", text)
+                self.assertIn("run `osk outdated` to refresh", text)
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = self.osk.main(["list", "--json"])
+                self.assertEqual(code, 0)
+        rows = {row["name"]: row for row in json.loads(out.getvalue())["skills"]}
+        self.assertTrue(rows["demo"]["update_available"])
+
+    def test_search_renders_results(self) -> None:
+        payload = {
+            "query": "pdf",
+            "searchType": "keyword",
+            "count": 1,
+            "duration_ms": 7,
+            "skills": [
+                {
+                    "id": "anthropics/skills/pdf",
+                    "skillId": "pdf",
+                    "name": "pdf",
+                    "installs": 174085,
+                    "source": "anthropics/skills",
+                }
+            ],
+        }
+        with mock.patch.object(self.osk, "http_get_json", return_value=payload):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = self.osk.command_search(
+                    SimpleNamespace(query="pdf", limit=20, json=False)
+                )
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("pdf", text)
+        self.assertIn("anthropics/skills", text)
+        self.assertIn("174.1k", text)
+        self.assertIn("gh:anthropics/skills/pdf@main", text)
+        self.assertIn("--dry-run --review", text)
+
+    def test_search_rejects_malformed_response(self) -> None:
+        for payload in ({"query": "pdf"}, {"skills": "oops"}, ["not", "a", "dict"]):
+            with mock.patch.object(self.osk, "http_get_json", return_value=payload):
+                with self.assertRaises(self.osk.OneskillError) as context:
+                    self.osk.command_search(SimpleNamespace(query="pdf", limit=20, json=False))
+            self.assertIn("missing the skills array", str(context.exception))
+
+    def test_search_skips_malformed_entries(self) -> None:
+        clean = {
+            "id": "anthropics/skills/pdf",
+            "skillId": "pdf",
+            "name": "pdf",
+            "installs": 174085,
+            "source": "anthropics/skills",
+        }
+        dirty = [
+            {"name": "no-other-fields"},
+            {"id": "a/b/c", "skillId": "", "name": "x", "installs": 3, "source": "a/b"},
+            {"id": "a/b/d", "skillId": "d", "name": "d", "installs": "many", "source": "a/b"},
+            "not-an-object",
+        ]
+        payload = {"query": "pdf", "skills": [dirty[0], clean, *dirty[1:]]}
+        with mock.patch.object(self.osk, "http_get_json", return_value=payload):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = self.osk.command_search(SimpleNamespace(query="pdf", limit=20, json=False))
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("gh:anthropics/skills/pdf@main", text)
+        self.assertIn("skipped 4 malformed entries from skills.sh", text)
+        self.assertIn("--dry-run --review", text)
+
+        with mock.patch.object(self.osk, "http_get_json", return_value=payload):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = self.osk.command_search(SimpleNamespace(query="pdf", limit=20, json=True))
+        self.assertEqual(code, 0)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report["skipped"], 4)
+        self.assertEqual([item["name"] for item in report["results"]], ["pdf"])
+
+        with mock.patch.object(self.osk, "http_get_json", return_value={"query": "x", "skills": dirty}):
+            with self.assertRaises(self.osk.OneskillError) as context:
+                self.osk.command_search(SimpleNamespace(query="x", limit=20, json=False))
+        self.assertIn("no usable entries", str(context.exception))
 
 
 if __name__ == "__main__":
