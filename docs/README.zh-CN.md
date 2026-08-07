@@ -77,6 +77,36 @@ skill 的来源、拉到的是哪个 commit、什么时候装的，`osk list` �
 第三方 skill 等于第三方提示词，你的 agent 会照着里面写的执行。装之前用 `--review` 把整个
 `SKILL.md` 打出来看清楚，只装你信得过的来源。
 
+## 收上来，和放下去
+
+现在管跨端 skill 的工具不止一个，[cc-switch](https://github.com/farion1231/cc-switch)
+是其中做得最全的——有桌面界面、能切 provider、能浏览注册表。值得先弄清楚各自是朝哪个
+方向跑的，因为方向决定了它能替你干什么。
+
+**安装器那类工具是往下放。** 你去浏览远程仓库或注册表，点安装，skill 落到各个工具的目录
+里。起点是别人维护的那份目录清单。
+
+**oneskill 是往上收。** 起点是你硬盘上已经有的东西：自己写的、某个厂商的安装器顺手塞进来
+的、半年前手动拷进第二个工具后就忘了的那份。`osk scan` 先就地盘点，`osk adopt` 把它们并成
+一份本体，`osk doctor` 则一直盯着——盯的就是某次工具升级悄悄把软链换成真实目录的那一刻。
+
+两者在中间是有重叠的：oneskill 也能从 GitHub 装，cc-switch 也用软链。但两头不一样，
+所以各自缺的东西也不一样：
+
+|  | oneskill | 安装器那类 |
+|---|---|---|
+| 收编硬盘上已有的 skill | `osk scan` / `osk adopt` | 基本不覆盖 |
+| 漂移检测 | `osk doctor` | 不是重点 |
+| 浏览注册表并安装 | `osk search` + `osk install` | 更全，还有界面 |
+| 交互方式 | CLI，可脚本化，agent 能直接调 | 通常是桌面应用 |
+| provider / MCP / 提示词管理 | 不在范围内 | 一般都带 |
+
+⚠️ **别让两个工具管同一个目录。** 如果 oneskill 和另一个管理器都往 `~/.claude/skills/`
+写软链，它们会互相覆盖，最后哪边都不对。选一个作为 skill 这块的权威。
+
+真要两个都用，就把两边的库都指到 `~/.agents/skills`。这个路径是社区正在形成的约定，
+oneskill 在 `osk init` 时会推荐它，cc-switch 从 v3.13 起也支持——这样至少本体还是一份。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -84,7 +114,9 @@ skill 的来源、拉到的是哪个 commit、什么时候装的，`osk list` �
 | `osk list` | 全工具覆盖矩阵，加 `--json` 输出机器可读格式 |
 | `osk doctor` | 找出跑偏的地方：断链、被真实目录盖住的软链、和清单对不上。只读，只打印修复命令，绝不代跑 |
 | `osk adopt <路径>` / `osk adopt --all` | 收编某个工具里的一个 skill，或一次收编全部未纳管的 |
+| `osk search <关键词>` | 搜 skills.sh 公共注册表，列出结果和对应的安装命令，自己绝不动手装 |
 | `osk install <源>` | 从本地目录或 `gh:owner/repo[/子目录][@ref]` 安装 |
+| `osk outdated [名字]` | 走 GitHub 接口查远程 skill 有没有更新。不下载、不改动任何 skill，查完 `osk list` 会用 `↑` 标出来 |
 | `osk update [名字]` | 更新一个或全部远程 skill |
 | `osk uninstall <名字>` | 各端断链，本体留作带时间戳的备份 |
 | `osk sync` | 拿磁盘上的实际情况和清单对账，可重复跑 |
@@ -140,7 +172,7 @@ skill 之后跑一下 `osk adopt`」，让 agent 顺手替你维护，比任何�
 
 ## 现状
 
-还年轻。安全这块有 35 个离线测试盯着，CI 在 Linux 和 macOS 上跑 Python 3.9 和 3.13，
+还年轻。安全这块有 46 个离线测试盯着，CI 在 Linux 和 macOS 上跑 Python 3.9 和 3.13，
 不过目前也就在不多几台机器上用过。要是你在别的环境上碰到问题，欢迎报 bug，对我很有帮助。
 
 ```bash

@@ -83,6 +83,42 @@ A third-party skill is a third-party prompt: your agent will act on whatever is 
 Pass `--review` to print the whole `SKILL.md` before installing, and only install from
 sources you trust.
 
+## Adopting vs. installing
+
+Several tools now manage skills across AI CLIs — [cc-switch](https://github.com/farion1231/cc-switch)
+is the most complete of them, with a desktop UI, provider switching, and a registry browser.
+It is worth knowing which direction each tool runs in, because that decides what it can do
+for you.
+
+**Installer-style tools push down.** You browse a remote repository or registry, click
+install, and the skill lands in each tool's directory. The starting point is a catalogue
+somebody else maintains.
+
+**oneskill pulls up.** The starting point is what is already on your disk: the skills you
+wrote yourself, the ones some vendor's installer dropped in, the copy you pasted into a
+second tool six months ago and forgot about. `osk scan` inventories them where they lie,
+`osk adopt` collapses them into one body, and `osk doctor` keeps watching for the moment a
+tool upgrade silently replaces a symlink with a real directory.
+
+The two overlap in the middle — oneskill installs from GitHub too, and cc-switch symlinks
+too — but the ends are different, and so are the gaps:
+
+|  | oneskill | installer-style |
+|---|---|---|
+| Adopt skills already on disk | `osk scan` / `osk adopt` | generally not covered |
+| Drift detection | `osk doctor` | not the focus |
+| Browse and install from a registry | `osk search` + `osk install` | richer, with a UI |
+| Interface | CLI, scriptable, agent-callable | usually a desktop app |
+| Provider / MCP / prompt management | out of scope | often included |
+
+⚠️ **Don't point two of them at the same directory.** If both oneskill and another manager
+write symlinks into `~/.claude/skills/`, they will overwrite each other's work and neither
+will be right. Pick one to be authoritative for skills.
+
+If you do run both, put the library at `~/.agents/skills` on each side. That path is an
+emerging community convention, oneskill offers it during `osk init`, and cc-switch supports
+it as of v3.13 — so at least the bodies stay one copy.
+
 ## Commands
 
 | Command | What it does |
@@ -90,7 +126,9 @@ sources you trust.
 | `osk list` | Coverage matrix across all tools. Add `--json` for machine output. |
 | `osk doctor` | Find drift: broken links, real directories shadowing symlinks, manifest mismatches. Read-only, so it prints fixes but never runs them. |
 | `osk adopt <path>` / `osk adopt --all` | Adopt one skill from a tool, or every unmanaged skill at once. |
+| `osk search <query>` | Search the skills.sh public registry. Prints results and the command to install one; never installs on its own. |
 | `osk install <source>` | Install from a local directory or `gh:owner/repo[/subdir][@ref]`. |
+| `osk outdated [name]` | Check remote skills for updates through the GitHub API. Downloads nothing, changes no skill; `osk list` then marks them with `↑`. |
 | `osk update [name]` | Update one remote skill, or all of them. |
 | `osk uninstall <name>` | Unlink everywhere; the body is kept as a timestamped backup. |
 | `osk sync` | Reconcile what's on disk against the manifest. Idempotent. |
@@ -150,7 +188,7 @@ update, and their contents are tied to Claude-specific tooling. oneskill just la
 
 ## Status
 
-Still early. The safety behavior is covered by 35 offline tests, and CI runs on Linux and
+Still early. The safety behavior is covered by 46 offline tests, and CI runs on Linux and
 macOS across Python 3.9 and 3.13, but it has only run on a few machines so far. If you hit a
 bug on another setup, a report would genuinely help.
 
