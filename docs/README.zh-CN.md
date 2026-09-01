@@ -123,6 +123,20 @@ oneskill 在 `osk init` 时会推荐它，cc-switch 从 v3.13 起也支持——
 | `osk scan --write` | 按当前环境生成清单 |
 | `osk init` | 首次配置 |
 
+### 有意只给单个工具用的 skill
+
+只链在一端的 skill 会被标 `needs review: single-client skill`——多数时候这是跑偏了。
+若确实是有意的（这个 skill 只对某一个工具有意义），在 `skills.json` 的对应条目里加上
+`"single_client_ok": true`，提示就不再出现：
+
+```json
+{ "name": "mail-attachment-organizer", "source": "self", "body": "...", "scope": ["codex"],
+  "single_client_ok": true }
+```
+
+这个标记能活过 `osk scan --write`。它绑定确认时的 body 路径，所以换掉该 skill 的实现后
+标记自动作废、重新回到待复核状态。
+
 ## 原理
 
 一个目录放所有 skill 的本体，各工具的 skills 目录里全是指过来的软链。清单记着「本该是什么

@@ -179,6 +179,9 @@ def validate_entry(entry: Any) -> dict[str, Any]:
             value = provenance.get(key)
             if not isinstance(value, str) or not value:
                 raise OneskillError(f"{name}: provenance.{key} must be a non-empty string")
+    single_ok = entry.get("single_client_ok")
+    if single_ok is not None and not isinstance(single_ok, bool):
+        raise OneskillError(f"{name}: single_client_ok must be true or false")
     return dict(entry)
 
 
@@ -545,6 +548,7 @@ def scan_plugins(cfg: dict[str, Path], occupied: set[str]) -> list[dict[str, Any
 
 def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
     previous_remote: dict[str, dict[str, Any]] = {}
+    previous_by_name: dict[str, dict[str, Any]] = {}
     if cfg["manifest"].is_file():
         try:
             previous = read_manifest(cfg["manifest"])
@@ -553,6 +557,9 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
         previous_remote = {
             item["name"]: item for item in previous["skills"] if item["source"] == "remote"
         }
+        # single_client_ok records a human decision and is independent of source,
+        # so index every previous entry by name rather than just the remote ones.
+        previous_by_name = {item["name"]: item for item in previous["skills"]}
     per_client = {client: visible_entries(cfg[client]) for client in CLIENTS}
     names = sorted(set().union(*(set(items) for items in per_client.values())))
     skills: list[dict[str, Any]] = []
@@ -589,9 +596,18 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
             for key in ("description", "provenance"):
                 if key in old_remote:
                     entry[key] = old_remote[key]
+        # Carry over a confirmed single-client decision. It was made about one
+        # specific body, so a changed body voids it and review comes back.
+        old_entry = previous_by_name.get(name)
+        if (
+            old_entry is not None
+            and old_entry.get("single_client_ok") is True
+            and old_entry.get("body") == entry["body"]
+        ):
+            entry["single_client_ok"] = True
         if body is None:
             entry["review"] = UNMANAGED_REVIEW
-        elif len(present) == 1:
+        elif len(present) == 1 and not entry.get("single_client_ok"):
             entry["review"] = PENDING_REVIEW
         skills.append(entry)
     occupied = {item["name"] for item in skills}

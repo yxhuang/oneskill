@@ -375,6 +375,53 @@ class OneskillIntegrationTest(unittest.TestCase):
         issues = json.loads(doctor.stdout)["issues"]
         self.assertTrue(any(issue["type"] == "scope_review" for issue in issues))
 
+    def test_scan_respects_single_client_ok(self) -> None:
+        """A confirmed single-client skill: no review flag, and the marker survives a rewrite."""
+        body = self.body("codex/skills/codex-only")
+        self.link("codex", "codex-only", body)
+        self.write_manifest(
+            [
+                {
+                    "name": "codex-only",
+                    "source": "self",
+                    "body": str(body),
+                    "scope": ["codex"],
+                    "single_client_ok": True,
+                }
+            ]
+        )
+        result = self.run_osk("scan", "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        entry = next(item for item in manifest["skills"] if item["name"] == "codex-only")
+        self.assertNotIn("review", entry)
+        self.assertIs(entry["single_client_ok"], True)
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout)
+
+    def test_single_client_ok_expires_when_body_changes(self) -> None:
+        """The confirmation is tied to one body; swapping it voids the marker."""
+        old_body = self.body("codex/skills/old-impl")
+        new_body = self.body("codex/skills/new-impl")
+        self.link("codex", "swapped", new_body)
+        self.write_manifest(
+            [
+                {
+                    "name": "swapped",
+                    "source": "self",
+                    "body": str(old_body),
+                    "scope": ["codex"],
+                    "single_client_ok": True,
+                }
+            ]
+        )
+        result = self.run_osk("scan", "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        entry = next(item for item in manifest["skills"] if item["name"] == "swapped")
+        self.assertNotIn("single_client_ok", entry)
+        self.assertIn("needs review", entry["review"])
+
     def test_list_groups_shared_and_attention_sections(self) -> None:
         self.build_audit_fixture()
         result = self.run_osk("list")

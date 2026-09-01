@@ -135,6 +135,20 @@ it as of v3.13 — so at least the bodies stay one copy.
 | `osk scan --write` | Generate the manifest from your current setup. |
 | `osk init` | First-time configuration. |
 
+### Intentionally single-client skills
+
+A skill linked into only one tool is flagged `needs review: single-client skill` — usually
+drift worth fixing. When it is deliberate (a skill that only makes sense for one tool), add
+`"single_client_ok": true` to its `skills.json` entry and the flag stops:
+
+```json
+{ "name": "mail-attachment-organizer", "source": "self", "body": "...", "scope": ["codex"],
+  "single_client_ok": true }
+```
+
+The flag survives `osk scan --write`. It is tied to the body path it was confirmed against,
+so replacing the skill's implementation clears it and asks for review again.
+
 ## How it works
 
 One directory holds every skill body. Each tool's skills directory holds symlinks that point
