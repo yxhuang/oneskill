@@ -1012,6 +1012,37 @@ def unique_backup(path: Path) -> Path:
     return candidate
 
 
+def prune_backups(path: Path, keep: int) -> list[Path]:
+    """Drop old `<name>.oneskill-backup-*` siblings, newest `keep` retained.
+
+    Called only after an update has succeeded. The in-flight backup is what
+    `rollback_remote_change` restores from, so it is always created; this just
+    stops the copies piling up afterwards. Default is to keep none: a remote
+    skill records source_url and ref, so any older version can be refetched
+    from upstream, while a 118MB skill would otherwise double on every update.
+    Timestamps are fixed-width, so lexical order is chronological order.
+    """
+    if keep < 0:
+        raise OneskillError("--keep-backups must be zero or greater")
+    prefix = f"{path.name}.oneskill-backup-"
+    existing = sorted(
+        (item for item in path.parent.glob(f"{prefix}*") if item.name != path.name),
+        key=lambda item: item.name,
+    )
+    removed: list[Path] = []
+    for item in existing[: max(len(existing) - keep, 0)]:
+        try:
+            if item.is_symlink() or item.is_file():
+                item.unlink()
+            else:
+                shutil.rmtree(item)
+        except OSError:
+            # a backup we cannot remove is not a reason to fail the update
+            continue
+        removed.append(item)
+    return removed
+
+
 def backup_target(path: Path, cfg: dict[str, Path]) -> Path:
     """Choose a backup path without leaving loadable copies in client skill directories."""
     for client in CLIENTS:
@@ -1301,6 +1332,8 @@ def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 )
                 raise OneskillError(f"update of {name} failed; rolled back as far as possible: {exc}") from exc
             print(f"updated: {name}")
+            for stale in prune_backups(target, args.keep_backups):
+                print(f"  removed old backup: {stale}")
     return 0
 
 
@@ -1915,6 +1948,16 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("name", nargs="?", help="remote skill name")
     update_parser.add_argument("--dry-run", action="store_true", help="print changes only")
     update_parser.add_argument("--yes", action="store_true", help="auto-confirm all updates")
+    update_parser.add_argument(
+        "--keep-backups",
+        type=int,
+        default=0,
+        metavar="N",
+        help="how many `.oneskill-backup-*` copies of each updated skill to keep after a successful "
+        "update (default 0: keep none). A remote skill records its source_url and ref, so any older "
+        "version can be fetched again from upstream; the backup is only the rollback path used while "
+        "the update is in flight and is always taken regardless of this setting.",
+    )
 
     uninstall_parser = subparsers.add_parser("uninstall", help="safely uninstall a remote skill")
     uninstall_parser.add_argument("name", help="remote skill name")

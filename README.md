@@ -169,7 +169,12 @@ step:
 - Every destructive step asks first, and shows the exact paths involved.
 - Conflicts are renamed, not removed. A copy sitting in a tool's directory is moved out of
   that tool's load path, into `~/.oneskill/backups/<tool>/`; a body in the library keeps a
-  timestamped backup next to it. There is no `rmtree` anywhere in the code.
+  timestamped backup next to it.
+- The one exception is `osk update`, which deletes the backup of the body it just replaced
+  once the update has succeeded (`--keep-backups N` to retain some). A remote skill records
+  its `source_url` and `ref`, so an older version is always refetchable from upstream, while
+  keeping every past body doubles a large skill on disk on every update. The backup is still
+  taken during the update and is what a failed update rolls back to.
 - `--dry-run` works everywhere and prints the plan without touching anything.
 - If an operation fails partway, it rolls back to where it started.
 - `list` and `doctor` are read-only and safe to run any time.

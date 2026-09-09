@@ -375,6 +375,52 @@ class OneskillIntegrationTest(unittest.TestCase):
         issues = json.loads(doctor.stdout)["issues"]
         self.assertTrue(any(issue["type"] == "scope_review" for issue in issues))
 
+    def test_prune_backups_keeps_requested_number(self) -> None:
+        osk = load_osk_module()
+        body = self.body("shared/big-skill")
+        stamps = ["20260101-000000", "20260202-000000", "20260303-000000"]
+        for stamp in stamps:
+            sibling = body.parent / f"{body.name}.oneskill-backup-{stamp}"
+            sibling.mkdir()
+            (sibling / "SKILL.md").write_text("old", encoding="utf-8")
+
+        removed = osk.prune_backups(body, 1)
+        self.assertEqual(len(removed), 2)
+        left = sorted(item.name for item in body.parent.glob(f"{body.name}.oneskill-backup-*"))
+        self.assertEqual(left, [f"{body.name}.oneskill-backup-20260303-000000"])
+        self.assertTrue(body.is_dir(), "pruning must never touch the live body")
+
+    def test_prune_backups_default_zero_removes_all(self) -> None:
+        osk = load_osk_module()
+        body = self.body("shared/big-skill")
+        sibling = body.parent / f"{body.name}.oneskill-backup-20260101-000000"
+        sibling.mkdir()
+        (sibling / "SKILL.md").write_text("old", encoding="utf-8")
+
+        removed = osk.prune_backups(body, 0)
+        self.assertEqual(len(removed), 1)
+        self.assertEqual(list(body.parent.glob(f"{body.name}.oneskill-backup-*")), [])
+        self.assertTrue(body.is_dir())
+
+    def test_prune_backups_ignores_other_skills(self) -> None:
+        osk = load_osk_module()
+        body = self.body("shared/alpha")
+        other = self.body("shared/alpha-extra")
+        mine = body.parent / f"{body.name}.oneskill-backup-20260101-000000"
+        mine.mkdir()
+        theirs = other.parent / f"{other.name}.oneskill-backup-20260101-000000"
+        theirs.mkdir()
+
+        osk.prune_backups(body, 0)
+        self.assertFalse(mine.exists())
+        self.assertTrue(theirs.exists(), "a different skill's backups must be left alone")
+
+    def test_prune_backups_rejects_negative_keep(self) -> None:
+        osk = load_osk_module()
+        body = self.body("shared/alpha")
+        with self.assertRaises(osk.OneskillError):
+            osk.prune_backups(body, -1)
+
     def test_scan_respects_single_client_ok(self) -> None:
         """A confirmed single-client skill: no review flag, and the marker survives a rewrite."""
         body = self.body("codex/skills/codex-only")
@@ -669,7 +715,10 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertEqual(self.manifest.read_bytes(), manifest_before)
         self.assertEqual(list(target.parent.glob("preview-update.oneskill-backup-*")), [])
 
-    def test_update_changed_body_preserves_old_version_as_backup(self) -> None:
+    def test_update_leaves_no_backup_by_default(self) -> None:
+        # A remote skill records source_url and ref, so the previous version is
+        # always refetchable from upstream. Keeping a full copy of every past
+        # body just doubles a large skill on disk on every update.
         fixture = self.remote_fixture(name="upgrade-me")
         installed = self.install_remote(fixture)
         self.assertEqual(installed.returncode, 0, installed.stderr)
@@ -685,11 +734,22 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertIn("added: new.txt", result.stdout)
         self.assertIn("modified: payload.txt", result.stdout)
         self.assertEqual((target / "payload.txt").read_text(), "version two\n")
+        self.assertEqual(list(target.parent.glob("upgrade-me.oneskill-backup-*")), [])
+        for client, raw_target in links_before.items():
+            self.assertEqual(os.readlink(self.client_path(client, "upgrade-me")), raw_target)
+
+    def test_update_keep_backups_retains_previous_body(self) -> None:
+        fixture = self.remote_fixture(name="upgrade-me")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "upgrade-me"
+        (fixture / "payload.txt").write_text("version two\n", encoding="utf-8")
+        result = self.run_osk("update", "upgrade-me", "--yes", "--keep-backups", "1")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual((target / "payload.txt").read_text(), "version two\n")
         backups = list(target.parent.glob("upgrade-me.oneskill-backup-*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual((backups[0] / "payload.txt").read_text(), "version one\n")
-        for client, raw_target in links_before.items():
-            self.assertEqual(os.readlink(self.client_path(client, "upgrade-me")), raw_target)
 
     def test_uninstall_unlinks_clients_backs_up_body_and_removes_manifest_entry(self) -> None:
         fixture = self.remote_fixture(name="remove-me")
