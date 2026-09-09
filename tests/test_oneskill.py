@@ -42,7 +42,10 @@ def load_osk_module():
 class OneskillIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="oneskill-test-", dir="/tmp")
-        self.base = Path(self.temporary.name)
+        # resolve(): on macOS /tmp is a symlink to /private/tmp, and osk writes
+        # the resolved form into the manifest. Start resolved so fixtures and
+        # scan output describe paths the same way.
+        self.base = Path(self.temporary.name).resolve()
         self.home = self.base / "home"
         self.agent = self.base / "agent-env"
         self.manifest = self.base / "skills.json"
@@ -788,7 +791,10 @@ class OneskillConfigTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="oneskill-config-test-", dir="/tmp")
-        self.base = Path(self.temporary.name)
+        # resolve(): on macOS /tmp is a symlink to /private/tmp, and osk writes
+        # the resolved form into the manifest. Start resolved so fixtures and
+        # scan output describe paths the same way.
+        self.base = Path(self.temporary.name).resolve()
         self.home = self.base / "home"
         self.library = self.base / "library"
         self.manifest = self.base / "skills.json"
@@ -925,7 +931,10 @@ class OneskillNetworkTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="oneskill-net-test-", dir="/tmp")
-        self.base = Path(self.temporary.name)
+        # resolve(): on macOS /tmp is a symlink to /private/tmp, and osk writes
+        # the resolved form into the manifest. Start resolved so fixtures and
+        # scan output describe paths the same way.
+        self.base = Path(self.temporary.name).resolve()
         self.home = self.base / "home"
         self.library = self.base / "library"
         self.manifest = self.base / "skills.json"

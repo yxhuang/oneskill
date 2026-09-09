@@ -121,6 +121,18 @@ def link_target(path: Path) -> Path:
     return normalized(raw)
 
 
+def same_body(left: Any, right: Any) -> bool:
+    """Whether two manifest body paths name the same directory.
+
+    A plain string compare is wrong wherever a path component is a symlink:
+    on macOS /tmp/x and /private/tmp/x are one directory but two strings, and
+    scan writes the resolved form while a hand-written manifest may not.
+    """
+    if left is None or right is None:
+        return left is None and right is None
+    return normalized(Path(left)) == normalized(Path(right))
+
+
 def within(path: Path, parent: Path) -> bool:
     try:
         normalized(path).relative_to(normalized(parent))
@@ -591,7 +603,7 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
         if (
             entry["source"] == "remote"
             and old_remote is not None
-            and old_remote.get("body") == entry["body"]
+            and same_body(old_remote.get("body"), entry["body"])
         ):
             for key in ("description", "provenance"):
                 if key in old_remote:
@@ -602,7 +614,7 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
         if (
             old_entry is not None
             and old_entry.get("single_client_ok") is True
-            and old_entry.get("body") == entry["body"]
+            and same_body(old_entry.get("body"), entry["body"])
         ):
             entry["single_client_ok"] = True
         if body is None:
