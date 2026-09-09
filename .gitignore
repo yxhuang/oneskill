@@ -3,4 +3,8 @@ __pycache__/
 
 # machine-local manifest; see skills.example.json
 /skills.json
+# runtime artifacts written next to the manifest: `osk outdated` cache and
+# the timestamped manifest backups taken before `osk scan --write`
+/update-cache.json
+/skills.json.bak-*
 
