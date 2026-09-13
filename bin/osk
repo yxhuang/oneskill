@@ -191,6 +191,8 @@ def validate_entry(entry: Any) -> dict[str, Any]:
             value = provenance.get(key)
             if not isinstance(value, str) or not value:
                 raise OneskillError(f"{name}: provenance.{key} must be a non-empty string")
+        if provenance.get("overlay") is not None:
+            validate_overlay(provenance["overlay"], name)
     single_ok = entry.get("single_client_ok")
     if single_ok is not None and not isinstance(single_ok, bool):
         raise OneskillError(f"{name}: single_client_ok must be true or false")
@@ -422,7 +424,11 @@ def extract_safe_tar(archive: Path, destination: Path) -> Path:
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             if not member.isfile():
-                raise OneskillError(f"unsupported link or special file in source archive: {member.name}")
+                # Links and special files are never extracted: a symlink in the
+                # archive (common in repos that alias a plugin directory) must not
+                # make the whole archive unusable, and skipping it can never escape
+                # the extraction directory.
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             source_file = handle.extractfile(member)
             if source_file is None:
@@ -458,23 +464,104 @@ def materialize_skill_source(source: str) -> Iterator[dict[str, Any]]:
             if commit_ref is None:
                 raise OneskillError("GitHub archive did not expose a commit SHA in its top-level directory")
             skill_dir = root / subdir if subdir else root
-            yield {"directory": skill_dir, "ref": commit_ref, "source_url": source}
+            yield {"directory": skill_dir, "root": root, "ref": commit_ref, "source_url": source}
         return
 
     local = Path(source).expanduser().absolute()
     if local.is_dir():
-        yield {"directory": local, "ref": "local", "source_url": str(local)}
+        yield {"directory": local, "root": local, "ref": "local", "source_url": str(local)}
         return
     if local.is_file() and (local.name.endswith(".tar.gz") or local.suffix == ".tgz"):
         with tempfile.TemporaryDirectory(prefix="oneskill-source-") as temporary:
             root = extract_safe_tar(local, Path(temporary) / "unpacked")
             yield {
                 "directory": root,
+                "root": root,
                 "ref": archive_commit_ref(root) or "local",
                 "source_url": str(local),
             }
         return
     raise OneskillError(f"source is neither a skill directory nor a supported gh: source: {source}")
+
+
+def validate_overlay(overlay: Any, name: str) -> dict[str, Any]:
+    """Check the shape of an overlay: files copied in from the source repo and
+    literal rewrites applied to SKILL.md after every install and update."""
+    if not isinstance(overlay, dict):
+        raise OneskillError(f"{name}: overlay must be an object")
+    unknown = set(overlay) - {"copy", "rewrite"}
+    if unknown:
+        raise OneskillError(f"{name}: overlay has unknown key(s): {', '.join(sorted(unknown))}")
+    copy = overlay.get("copy", {})
+    if not isinstance(copy, dict):
+        raise OneskillError(f"{name}: overlay.copy must map skill-relative paths to repo-relative paths")
+    for destination, origin in copy.items():
+        for label, value in (("destination", destination), ("source", origin)):
+            if not isinstance(value, str) or not value:
+                raise OneskillError(f"{name}: overlay.copy {label} must be a non-empty string")
+            parts = Path(value).parts
+            if Path(value).is_absolute() or any(part in {"", ".", ".."} for part in parts):
+                raise OneskillError(f"{name}: unsafe overlay.copy {label}: {value!r}")
+    rewrite = overlay.get("rewrite", [])
+    if not isinstance(rewrite, list):
+        raise OneskillError(f"{name}: overlay.rewrite must be a list of [old, new] pairs")
+    for pair in rewrite:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not all(isinstance(item, str) for item in pair)
+            or not pair[0]
+        ):
+            raise OneskillError(f"{name}: overlay.rewrite entries must be [old, new] with a non-empty old")
+    return {"copy": dict(copy), "rewrite": [list(pair) for pair in rewrite]}
+
+
+def apply_overlay(skill_dir: Path, root: Path, overlay: dict[str, Any], name: str) -> None:
+    """Copy repo files into the staged skill and rewrite SKILL.md links so the
+    skill is self-contained. Every step must find what it expects: if upstream
+    moved a file or changed a link, the install or update stops instead of
+    silently shipping a half-adapted skill."""
+    for destination, origin in overlay.get("copy", {}).items():
+        source = root / origin
+        if not within(source, root) or not source.is_file() or source.is_symlink():
+            raise OneskillError(
+                f"{name}: overlay.copy source {origin!r} is not a regular file in the source"
+                " (upstream may have moved it)"
+            )
+        target = skill_dir / destination
+        if not within(target, skill_dir):
+            raise OneskillError(f"{name}: overlay.copy destination escapes the skill: {destination!r}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    rewrite = overlay.get("rewrite", [])
+    if rewrite:
+        skill_file = skill_dir / "SKILL.md"
+        text = skill_file.read_text(encoding="utf-8")
+        for old, new in rewrite:
+            if old not in text:
+                raise OneskillError(
+                    f"{name}: overlay.rewrite text not found in SKILL.md: {old!r}"
+                    " (upstream may have changed the link)"
+                )
+            text = text.replace(old, new)
+        skill_file.write_text(text, encoding="utf-8")
+
+
+@contextmanager
+def stage_skill_source(
+    resolved: dict[str, Any], overlay: dict[str, Any] | None, name: str
+) -> Iterator[Path]:
+    """Yield the directory to install from: the raw source, or a temporary copy
+    with the overlay applied."""
+    source_dir = Path(resolved["directory"])
+    if not overlay:
+        yield source_dir
+        return
+    with tempfile.TemporaryDirectory(prefix="oneskill-stage-") as temporary:
+        staged = Path(temporary) / source_dir.name
+        shutil.copytree(source_dir, staged, symlinks=True)
+        apply_overlay(staged, Path(resolved["root"]), overlay, name)
+        yield staged
 
 
 def tree_snapshot(root: Path) -> dict[str, str]:
@@ -1110,19 +1197,43 @@ def rollback_adopt(
             shutil.move(str(target), str(source))
 
 
-def remote_entry(name: str, description: str, target: Path, resolved: dict[str, Any]) -> dict[str, Any]:
+def provenance_record(resolved: dict[str, Any], overlay: dict[str, Any] | None) -> dict[str, Any]:
+    record = {
+        "source_url": resolved["source_url"],
+        "ref": resolved["ref"],
+        "installed_at": installed_at_now(),
+    }
+    if overlay:
+        record["overlay"] = overlay
+    return record
+
+
+def remote_entry(
+    name: str,
+    description: str,
+    target: Path,
+    resolved: dict[str, Any],
+    overlay: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "name": name,
         "source": "remote",
         "body": str(target),
         "scope": "shared",
         "description": description,
-        "provenance": {
-            "source_url": resolved["source_url"],
-            "ref": resolved["ref"],
-            "installed_at": installed_at_now(),
-        },
+        "provenance": provenance_record(resolved, overlay),
     }
+
+
+def read_overlay_file(path: str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    overlay_path = Path(path).expanduser()
+    try:
+        payload = json.loads(overlay_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OneskillError(f"cannot read overlay file {overlay_path}: {exc}") from exc
+    return validate_overlay(payload, f"overlay file {overlay_path}")
 
 
 def remote_body_for_entry(entry: dict[str, Any], cfg: dict[str, Path]) -> Path:
@@ -1165,106 +1276,125 @@ def rollback_remote_change(
 
 def command_install(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
     manifest = read_manifest(cfg["manifest"], allow_missing=True)
+    overlay = read_overlay_file(getattr(args, "overlay", None))
     with materialize_skill_source(args.source) as resolved:
-        source_dir = Path(resolved["directory"])
-        metadata = read_skill_metadata(source_dir)
-        name, description = metadata["name"], metadata["description"]
-        validate_remote_skill_name(name)
-        target = cfg["library"] / "remote" / name
-        if within(source_dir, target) or within(target, source_dir):
-            raise OneskillError("source directory and installation target must not contain one another")
+        raw_metadata = read_skill_metadata(Path(resolved["directory"]))
+        validate_remote_skill_name(raw_metadata["name"])
+        with stage_skill_source(resolved, overlay, raw_metadata["name"]) as source_dir:
+            return install_staged_skill(args, cfg, manifest, resolved, source_dir, overlay)
 
-        print(f"Source: {resolved['source_url']}")
-        print(f"Name: {name}")
-        print(f"Description: {description}")
-        if args.review:
-            skill_text = (source_dir / "SKILL.md").read_text(encoding="utf-8")
-            print(f"\n===== BEGIN SKILL.md: {name} =====")
-            print(skill_text, end="" if skill_text.endswith("\n") else "\n")
-            print(f"===== END SKILL.md: {name} =====\n")
 
-        existing_entry = next((item for item in manifest["skills"] if item["name"] == name), None)
-        body_backup = unique_backup(target) if path_exists(target) else None
-        actions: list[dict[str, Any]] = []
-        for client in CLIENTS:
-            destination = cfg[client] / name
-            if destination.is_symlink() and link_target(destination) == normalized(target):
-                continue
-            if destination.is_symlink():
-                actions.append(
-                    {"kind": "replace_link", "path": destination, "raw_target": os.readlink(destination)}
-                )
-            elif path_exists(destination):
-                actions.append(
-                    {"kind": "replace_real", "path": destination, "backup": backup_target(destination, cfg)}
-                )
-            else:
-                actions.append({"kind": "create", "path": destination})
+def install_staged_skill(
+    args: argparse.Namespace,
+    cfg: dict[str, Path],
+    manifest: dict[str, Any],
+    resolved: dict[str, Any],
+    source_dir: Path,
+    overlay: dict[str, Any] | None,
+) -> int:
+    metadata = read_skill_metadata(source_dir)
+    name, description = metadata["name"], metadata["description"]
+    validate_remote_skill_name(name)
+    target = cfg["library"] / "remote" / name
+    if within(source_dir, target) or within(target, source_dir):
+        raise OneskillError("source directory and installation target must not contain one another")
 
-        confirmations = [f"install {name} into {target} and link it into all clients"]
-        if body_backup is not None:
-            confirmations.append(f"move existing body {target} -> {body_backup}")
-        if existing_entry is not None:
-            confirmations.append(f"replace existing manifest entry for {name}")
-        for action in actions:
-            if action["kind"] == "replace_real":
-                confirmations.append(
-                    f"move conflicting item {action['path']} -> {action['backup']}"
-                )
-            elif action["kind"] == "replace_link":
-                confirmations.append(f"replace conflicting symlink {action['path']} -> {target}")
-        for description_text in confirmations:
-            if not confirm(description_text, args.yes, args.dry_run):
-                print("Declined; no changes were made.")
-                return 1
-        for action in actions:
-            if action["kind"] == "create":
-                print(f"About to: create symlink {action['path']} -> {target}")
-        print(f"About to: update manifest {cfg['manifest']}")
-        if args.dry_run:
-            print("dry-run complete: no changes made.")
-            return 0
+    print(f"Source: {resolved['source_url']}")
+    print(f"Name: {name}")
+    print(f"Description: {description}")
+    if overlay:
+        print(
+            f"Overlay: {len(overlay.get('copy', {}))} file(s) copied in,"
+            f" {len(overlay.get('rewrite', []))} SKILL.md rewrite(s)"
+        )
+    if args.review:
+        skill_text = (source_dir / "SKILL.md").read_text(encoding="utf-8")
+        print(f"\n===== BEGIN SKILL.md: {name} =====")
+        print(skill_text, end="" if skill_text.endswith("\n") else "\n")
+        print(f"===== END SKILL.md: {name} =====\n")
 
-        created_links: list[Path] = []
-        path_backups: list[tuple[Path, Path]] = []
-        replaced_links: list[tuple[Path, str]] = []
-        body_moved = False
-        target_replaced = body_backup is None
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if body_backup is not None:
-                os.replace(target, body_backup)
-                body_moved = True
-                target_replaced = True
-            shutil.copytree(source_dir, target, symlinks=True)
-            for action in actions:
-                destination = action["path"]
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if action["kind"] == "replace_real":
-                    action["backup"].parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(destination, action["backup"])
-                    path_backups.append((destination, action["backup"]))
-                elif action["kind"] == "replace_link":
-                    destination.unlink()
-                    replaced_links.append((destination, action["raw_target"]))
-                destination.symlink_to(target, target_is_directory=True)
-                created_links.append(destination)
-            replacement = remote_entry(name, description, target, resolved)
-            if existing_entry is None:
-                manifest["skills"].append(replacement)
-            else:
-                manifest["skills"][manifest["skills"].index(existing_entry)] = replacement
-            write_manifest(cfg["manifest"], manifest)
-        except Exception as exc:
-            rollback_remote_change(
-                target,
-                body_backup if body_moved else None,
-                target_replaced,
-                created_links,
-                path_backups,
-                replaced_links,
+    existing_entry = next((item for item in manifest["skills"] if item["name"] == name), None)
+    body_backup = unique_backup(target) if path_exists(target) else None
+    actions: list[dict[str, Any]] = []
+    for client in CLIENTS:
+        destination = cfg[client] / name
+        if destination.is_symlink() and link_target(destination) == normalized(target):
+            continue
+        if destination.is_symlink():
+            actions.append(
+                {"kind": "replace_link", "path": destination, "raw_target": os.readlink(destination)}
             )
-            raise OneskillError(f"installation failed; rolled back as far as possible: {exc}") from exc
+        elif path_exists(destination):
+            actions.append(
+                {"kind": "replace_real", "path": destination, "backup": backup_target(destination, cfg)}
+            )
+        else:
+            actions.append({"kind": "create", "path": destination})
+
+    confirmations = [f"install {name} into {target} and link it into all clients"]
+    if body_backup is not None:
+        confirmations.append(f"move existing body {target} -> {body_backup}")
+    if existing_entry is not None:
+        confirmations.append(f"replace existing manifest entry for {name}")
+    for action in actions:
+        if action["kind"] == "replace_real":
+            confirmations.append(
+                f"move conflicting item {action['path']} -> {action['backup']}"
+            )
+        elif action["kind"] == "replace_link":
+            confirmations.append(f"replace conflicting symlink {action['path']} -> {target}")
+    for description_text in confirmations:
+        if not confirm(description_text, args.yes, args.dry_run):
+            print("Declined; no changes were made.")
+            return 1
+    for action in actions:
+        if action["kind"] == "create":
+            print(f"About to: create symlink {action['path']} -> {target}")
+    print(f"About to: update manifest {cfg['manifest']}")
+    if args.dry_run:
+        print("dry-run complete: no changes made.")
+        return 0
+
+    created_links: list[Path] = []
+    path_backups: list[tuple[Path, Path]] = []
+    replaced_links: list[tuple[Path, str]] = []
+    body_moved = False
+    target_replaced = body_backup is None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if body_backup is not None:
+            os.replace(target, body_backup)
+            body_moved = True
+            target_replaced = True
+        shutil.copytree(source_dir, target, symlinks=True)
+        for action in actions:
+            destination = action["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if action["kind"] == "replace_real":
+                action["backup"].parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, action["backup"])
+                path_backups.append((destination, action["backup"]))
+            elif action["kind"] == "replace_link":
+                destination.unlink()
+                replaced_links.append((destination, action["raw_target"]))
+            destination.symlink_to(target, target_is_directory=True)
+            created_links.append(destination)
+        replacement = remote_entry(name, description, target, resolved, overlay)
+        if existing_entry is None:
+            manifest["skills"].append(replacement)
+        else:
+            manifest["skills"][manifest["skills"].index(existing_entry)] = replacement
+        write_manifest(cfg["manifest"], manifest)
+    except Exception as exc:
+        rollback_remote_change(
+            target,
+            body_backup if body_moved else None,
+            target_replaced,
+            created_links,
+            path_backups,
+            replaced_links,
+        )
+        raise OneskillError(f"installation failed; rolled back as far as possible: {exc}") from exc
     print(f"installed: {name}")
     return 0
 
@@ -1295,8 +1425,10 @@ def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
         target = remote_body_for_entry(entry, cfg)
         if not target.is_dir() or target.is_symlink():
             raise OneskillError(f"remote skill body is missing or not a real directory: {target}")
-        with materialize_skill_source(provenance["source_url"]) as resolved:
-            source_dir = Path(resolved["directory"])
+        overlay = provenance.get("overlay")
+        with materialize_skill_source(provenance["source_url"]) as resolved, stage_skill_source(
+            resolved, overlay, name
+        ) as source_dir:
             metadata = read_skill_metadata(source_dir)
             validate_remote_skill_name(metadata["name"])
             if metadata["name"] != name:
@@ -1327,11 +1459,7 @@ def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 target_replaced = True
                 shutil.copytree(source_dir, target, symlinks=True)
                 entry["description"] = metadata["description"]
-                entry["provenance"] = {
-                    "source_url": resolved["source_url"],
-                    "ref": resolved["ref"],
-                    "installed_at": installed_at_now(),
-                }
+                entry["provenance"] = provenance_record(resolved, overlay)
                 write_manifest(cfg["manifest"], manifest)
             except Exception as exc:
                 rollback_remote_change(
@@ -1950,6 +2078,13 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument("source", help="local skill directory or gh: GitHub source")
     install_parser.add_argument(
         "--review", action="store_true", help="print the complete SKILL.md before confirmation"
+    )
+    install_parser.add_argument(
+        "--overlay",
+        metavar="FILE",
+        help="JSON file {\"copy\": {\"<skill path>\": \"<repo path>\"}, \"rewrite\": [[old, new], ...]} "
+        "applied after every install and update so a skill lifted out of a larger repo stays "
+        "self-contained; recorded in the manifest provenance",
     )
     install_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
     install_parser.add_argument("--yes", action="store_true", help="auto-confirm all actions")

@@ -83,6 +83,29 @@ A third-party skill is a third-party prompt: your agent will act on whatever is 
 Pass `--review` to print the whole `SKILL.md` before installing, and only install from
 sources you trust.
 
+### Lifting one skill out of a larger repo
+
+Some skills are written as part of a whole workflow repo and link to sibling files
+(`../../rules/protocol.md`, a persona under `~/tool/personas/`). Installed on their own,
+those links dangle. An *overlay* keeps such a skill self-contained without forking it:
+
+```bash
+osk install gh:owner/workflow-repo/.claude/skills/audit@main --overlay audit.overlay.json
+```
+
+```json
+{
+  "copy":    {"references/protocol.md": ".claude/rules/protocol.md"},
+  "rewrite": [["../../rules/protocol.md", "references/protocol.md"]]
+}
+```
+
+`copy` maps a path inside the skill to a path inside the source repo; `rewrite` is a list
+of literal `[old, new]` replacements applied to `SKILL.md`. The overlay is recorded in the
+manifest and re-applied on every `osk update`, so the copied files follow upstream too.
+If upstream moves a file or changes a link, the update stops before touching the installed
+body instead of shipping a half-adapted skill; fix the overlay in the manifest and rerun.
+
 ## Adopting vs. installing
 
 Several tools now manage skills across AI CLIs — [cc-switch](https://github.com/farion1231/cc-switch)
@@ -127,7 +150,7 @@ it as of v3.13 — so at least the bodies stay one copy.
 | `osk doctor` | Find drift: broken links, real directories shadowing symlinks, manifest mismatches. Read-only, so it prints fixes but never runs them. |
 | `osk adopt <path>` / `osk adopt --all` | Adopt one skill from a tool, or every unmanaged skill at once. |
 | `osk search <query>` | Search the skills.sh public registry. Prints results and the command to install one; never installs on its own. |
-| `osk install <source>` | Install from a local directory or `gh:owner/repo[/subdir][@ref]`. |
+| `osk install <source>` | Install from a local directory or `gh:owner/repo[/subdir][@ref]`. `--overlay FILE` copies sibling files in and rewrites links so a skill lifted out of a larger repo stays self-contained. |
 | `osk outdated [name]` | Check remote skills for updates through the GitHub API. Downloads nothing, changes no skill; `osk list` then marks them with `↑`. |
 | `osk update [name]` | Update one remote skill, or all of them. |
 | `osk uninstall <name>` | Unlink everywhere; the body is kept as a timestamped backup. |

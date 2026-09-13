@@ -611,6 +611,105 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertEqual(entry["name"], "archive-skill")
         self.assertEqual(entry["provenance"]["ref"], "abcdef123456")
 
+    def test_install_skips_symlinks_inside_archive(self) -> None:
+        # Repos often alias a plugin directory with a symlink; that must not make
+        # the archive unusable, and the link itself is never extracted.
+        source = self.remote_fixture(name="linked-skill")
+        archive = self.base / "linked-skill.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            handle.add(source, arcname="owner-repo-abcdef123456")
+            link = tarfile.TarInfo("owner-repo-abcdef123456/alias")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../../etc"
+            handle.addfile(link)
+        self.agent.mkdir(parents=True)
+        result = self.run_osk("install", str(archive), "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        installed = self.agent / "remote" / "linked-skill"
+        self.assertTrue((installed / "payload.txt").is_file())
+        self.assertFalse(os.path.lexists(installed / "alias"))
+
+    def overlay_fixture(self, name: str = "overlaid") -> tuple[Path, Path]:
+        # A skill lifted out of a larger repo: SKILL.md links to a sibling rules
+        # file that the overlay copies in and re-points.
+        source = self.remote_fixture(name=name)
+        (source / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A remote test skill.\n---\n\n"
+            "Read [`protocol.md`](../rules/protocol.md) first.\n",
+            encoding="utf-8",
+        )
+        (source / "rules").mkdir()
+        (source / "rules" / "protocol.md").write_text("tolerance 0.01\n", encoding="utf-8")
+        overlay = self.base / "overlay.json"
+        overlay.write_text(
+            json.dumps(
+                {
+                    "copy": {"references/protocol.md": "rules/protocol.md"},
+                    "rewrite": [["../rules/protocol.md", "references/protocol.md"]],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return source, overlay
+
+    def test_install_overlay_copies_files_rewrites_links_and_is_reapplied_on_update(self) -> None:
+        source, overlay = self.overlay_fixture()
+        result = self.install_remote(source, "--overlay", str(overlay))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("Overlay: 1 file(s) copied in, 1 SKILL.md rewrite(s)", result.stdout)
+        installed = self.agent / "remote" / "overlaid"
+        self.assertEqual((installed / "references" / "protocol.md").read_text(), "tolerance 0.01\n")
+        self.assertIn("(references/protocol.md)", (installed / "SKILL.md").read_text())
+        self.assertNotIn("../rules/", (installed / "SKILL.md").read_text())
+        entry = json.loads(self.manifest.read_text(encoding="utf-8"))["skills"][0]
+        self.assertEqual(
+            entry["provenance"]["overlay"]["copy"], {"references/protocol.md": "rules/protocol.md"}
+        )
+
+        # Unchanged upstream: the overlaid body must compare equal, so no rewrite.
+        noop = self.run_osk("update", "overlaid", "--yes")
+        self.assertEqual(noop.returncode, 0, noop.stderr + noop.stdout)
+        self.assertIn("already up to date", noop.stdout)
+
+        # Upstream edits the rules file: the update carries the new copy in and
+        # keeps the rewritten link and the overlay record.
+        (source / "rules" / "protocol.md").write_text("tolerance 0.05\n", encoding="utf-8")
+        updated = self.run_osk("update", "overlaid", "--yes")
+        self.assertEqual(updated.returncode, 0, updated.stderr + updated.stdout)
+        self.assertIn("modified: references/protocol.md", updated.stdout)
+        self.assertEqual((installed / "references" / "protocol.md").read_text(), "tolerance 0.05\n")
+        self.assertIn("(references/protocol.md)", (installed / "SKILL.md").read_text())
+        entry = json.loads(self.manifest.read_text(encoding="utf-8"))["skills"][0]
+        self.assertIn("overlay", entry["provenance"])
+
+    def test_update_stops_when_upstream_breaks_the_overlay(self) -> None:
+        source, overlay = self.overlay_fixture(name="drifting")
+        result = self.install_remote(source, "--overlay", str(overlay))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        installed = self.agent / "remote" / "drifting"
+        body_before = (installed / "SKILL.md").read_text()
+        manifest_before = self.manifest.read_bytes()
+        (source / "SKILL.md").write_text(
+            "---\nname: drifting\ndescription: A remote test skill.\n---\n\nLink moved.\n",
+            encoding="utf-8",
+        )
+        drifted = self.run_osk("update", "drifting", "--yes")
+        self.assertEqual(drifted.returncode, 2)
+        self.assertIn("overlay.rewrite text not found", drifted.stderr)
+        self.assertEqual((installed / "SKILL.md").read_text(), body_before)
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(list(installed.parent.glob("drifting.oneskill-backup-*")), [])
+
+    def test_install_overlay_rejects_escaping_paths(self) -> None:
+        source, overlay = self.overlay_fixture(name="escaping")
+        overlay.write_text(
+            json.dumps({"copy": {"../outside.md": "rules/protocol.md"}}), encoding="utf-8"
+        )
+        result = self.install_remote(source, "--overlay", str(overlay))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsafe overlay.copy destination", result.stderr)
+        self.assertFalse(self.manifest.exists())
+
     def test_install_rejects_tar_path_traversal(self) -> None:
         archive = self.base / "unsafe.tar.gz"
         content = b"escape attempt\n"
