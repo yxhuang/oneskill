@@ -529,6 +529,24 @@ class OneskillIntegrationTest(unittest.TestCase):
         text_listing = self.run_osk("list")
         self.assertIn("NEEDS ATTENTION", text_listing.stdout)
 
+    def test_claude_synced_account_skills_dir_is_ignored(self) -> None:
+        self.agent.mkdir(parents=True, exist_ok=True)
+        mirrored = self.client_path("claude", "synced") / "org_user" / "pdf"
+        mirrored.mkdir(parents=True)
+        (mirrored / "SKILL.md").write_text("# pdf\n", encoding="utf-8")
+        scan = self.run_osk("scan", "--write")
+        self.assertEqual(scan.returncode, 0, scan.stderr)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        self.assertNotIn("synced", [item["name"] for item in manifest["skills"]])
+        doctor = self.run_osk("doctor", "--json")
+        self.assertNotIn("synced", [issue["skill"] for issue in json.loads(doctor.stdout)["issues"]])
+        # only claude reserves the name: a codex skill called synced is still seen
+        self.client_path("codex", "synced").mkdir()
+        listing = self.run_osk("list", "--json")
+        rows = {row["name"]: row for row in json.loads(listing.stdout)["skills"]}
+        self.assertIn("synced", rows)
+        self.assertEqual(rows["synced"]["clients"]["codex"]["state"], "extra")
+
     def test_doctor_never_suggests_self_referential_link(self) -> None:
         self.build_audit_fixture()
         self.make_unmanaged_fixture()

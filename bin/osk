@@ -31,6 +31,10 @@ CLIENTS = {
     "codex": (".codex", "skills"),
     "kimi": (".kimi-code", "skills"),
 }
+# Directories a client writes into its own skills dir for its own purposes.
+# Claude Code mirrors the claude.ai account's skills into skills/synced/<id>/;
+# it is not one skill, and adopting it would break (and be undone by) that sync.
+CLIENT_MANAGED_DIRS = {"claude": frozenset({"synced"})}
 SOURCES = {"self", "vendor", "external", "plugin", "remote"}
 MANIFEST_VERSION = 2
 SUPPORTED_MANIFEST_VERSIONS = {1, MANIFEST_VERSION}
@@ -594,14 +598,15 @@ def compare_skill_trees(old: Path, new: Path) -> dict[str, list[str]]:
     }
 
 
-def visible_entries(directory: Path) -> dict[str, Path]:
+def visible_entries(directory: Path, client: str | None = None) -> dict[str, Path]:
     if not directory.is_dir():
         return {}
+    managed = CLIENT_MANAGED_DIRS.get(client, frozenset())
     try:
         return {
             item.name: item
             for item in directory.iterdir()
-            if not item.name.startswith(".")
+            if not item.name.startswith(".") and item.name not in managed
         }
     except OSError as exc:
         raise OneskillError(f"cannot scan {directory}: {exc}") from exc
@@ -659,7 +664,7 @@ def scan_environment(cfg: dict[str, Path]) -> dict[str, Any]:
         # single_client_ok records a human decision and is independent of source,
         # so index every previous entry by name rather than just the remote ones.
         previous_by_name = {item["name"]: item for item in previous["skills"]}
-    per_client = {client: visible_entries(cfg[client]) for client in CLIENTS}
+    per_client = {client: visible_entries(cfg[client], client) for client in CLIENTS}
     names = sorted(set().union(*(set(items) for items in per_client.values())))
     skills: list[dict[str, Any]] = []
     for name in names:
@@ -751,7 +756,7 @@ def inspect_path(path: Path, body: Path, expected: bool) -> dict[str, Any]:
 
 def build_inventory(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str, Any]:
     declared = {item["name"]: item for item in manifest["skills"]}
-    actual = {client: visible_entries(cfg[client]) for client in CLIENTS}
+    actual = {client: visible_entries(cfg[client], client) for client in CLIENTS}
     actual_names = set().union(*(set(items) for items in actual.values()))
     rows: list[dict[str, Any]] = []
     for name in sorted(set(declared) | actual_names, key=str.casefold):
