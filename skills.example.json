@@ -4,7 +4,7 @@
     {
       "name": "pdf-editing",
       "source": "self",
-      "body": "/home/you/skill-library/claude/skills/pdf-editing",
+      "body": "/home/you/skill-library/skills/pdf-editing",
       "scope": "shared"
     },
     {

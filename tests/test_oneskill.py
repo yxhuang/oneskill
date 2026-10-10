@@ -105,10 +105,10 @@ class OneskillIntegrationTest(unittest.TestCase):
         )
 
     def build_audit_fixture(self) -> None:
-        healthy = self.body("claude/skills/healthy")
-        missing = self.body("claude/skills/missing")
+        healthy = self.body("skills/healthy")
+        missing = self.body("skills/missing")
         shadow = self.body("vendor/shadow")
-        broken_expected = self.body("claude/skills/broken")
+        broken_expected = self.body("skills/broken")
         for client in CLIENT_PATHS:
             self.link(client, "healthy", healthy)
         self.link("claude", "missing", missing)
@@ -354,7 +354,7 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertNotIn("! extra", listing.stdout)
 
     def test_list_json_is_clean_json(self) -> None:
-        body = self.body("claude/skills/one")
+        body = self.body("skills/one")
         self.link("claude", "one", body)
         self.write_manifest(
             [{"name": "one", "source": "self", "body": str(body), "scope": ["claude"]}]
@@ -489,7 +489,7 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertIn("broken", attention_section)
 
     def test_list_hides_attention_section_when_clean(self) -> None:
-        body = self.body("claude/skills/tidy")
+        body = self.body("skills/tidy")
         for client in CLIENT_PATHS:
             self.link(client, "tidy", body)
         self.write_manifest(

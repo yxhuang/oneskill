@@ -178,7 +178,7 @@ One directory holds every skill body. Each tool's skills directory holds symlink
 into it. A manifest records what should be there, so drift becomes a diff instead of a guess.
 
 ```
-  ~/skill-library/pdf-editing/SKILL.md   ← the only real copy
+  ~/skill-library/skills/pdf-editing/SKILL.md   ← the only real copy
         ↑              ↑            ↑
   ~/.claude/     ~/.codex/    ~/.kimi-code/
     skills/        skills/       skills/

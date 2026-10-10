@@ -143,7 +143,7 @@ oneskill 在 `osk init` 时会推荐它，cc-switch 从 v3.13 起也支持——
 样」，这样有没有跑偏，一对比就知道，不用猜。
 
 ```
-  ~/skill-library/pdf-editing/SKILL.md   ← 唯一的真实副本
+  ~/skill-library/skills/pdf-editing/SKILL.md   ← 唯一的真实副本
         ↑              ↑            ↑
   ~/.claude/     ~/.codex/    ~/.kimi-code/
     skills/        skills/       skills/
