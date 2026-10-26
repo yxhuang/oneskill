@@ -223,10 +223,13 @@ If you'd rather go one by one, `osk doctor` prints a single `adopt` command per 
 Yes. The tool paths live in one mapping near the top of `bin/osk`. Add an entry, and scan,
 list, sync, and install all pick it up.
 
-**Why aren't Claude Code plugin skills shared?**
-They live in cache paths with a version number in them, so the symlink breaks on every plugin
-update, and their contents are tied to Claude-specific tooling. oneskill just labels them
-`claude-only` instead of pretending they can be shared.
+**Can Claude Code plugin skills be shared?**
+Plugin bundles remain `claude-only`: versioned cache paths and Claude-specific tooling make
+automatic sharing unsafe. If you deliberately symlink a portable skill from a stable plugin
+path, `scan` records that skill body as `external` and audits its existing client links,
+including Codex's `~/.agents/skills/` directory. The installed plugin bundle is recorded
+separately (as `plugin:<name>` when the names collide) and stays managed by Claude.
+Scanning does not create links or decide whether a skill is portable.
 
 ## Status
 

@@ -184,9 +184,11 @@ skill 之后跑一下 `osk adopt`」，让 agent 顺手替你维护，比任何�
 能。工具的路径集中写在 `bin/osk` 顶上的一个映射里，加一条，scan、list、sync、install 就
 全都认了。
 
-**为什么 Claude Code 的插件 skill 不共享？**
-它们放在带版本号的缓存路径里，插件一升级软链就断；内容也跟 Claude 专有的那套东西绑得很
-深。oneskill 干脆如实把它们标成 `claude-only`，不假装能共享。
+**Claude Code 的插件 skill 能共享吗？**
+插件包仍标为 `claude-only`：带版本号的缓存路径和 Claude 专有工具使自动共享不可靠。
+如果你已从稳定插件路径为可跨端使用的 skill 建好软链，`scan` 会将这份正文记为 `external`，
+核查已有的客户端链接，也识别 Codex 的 `~/.agents/skills/` 目录。已安装的插件包单独登记
+（同名时记为 `plugin:<name>`），仍由 Claude 管理。扫描不会新建链接，也不会替你判断兼容性。
 
 ## 现状
 

@@ -378,6 +378,106 @@ class OneskillIntegrationTest(unittest.TestCase):
         issues = json.loads(doctor.stdout)["issues"]
         self.assertTrue(any(issue["type"] == "scope_review" for issue in issues))
 
+    def plugin_fixture(self, name: str = "frontend-design") -> tuple[Path, Path]:
+        plugins = self.home / ".claude" / "plugins"
+        cached = plugins / "cache" / "official" / name / "v1"
+        cached.mkdir(parents=True)
+        body = plugins / "marketplaces" / "official" / "plugins" / name / "skills" / name
+        body.mkdir(parents=True)
+        (body / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+        (plugins / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {f"{name}@official": [{"installPath": str(cached)}]}}),
+            encoding="utf-8",
+        )
+        self.agent.mkdir(parents=True, exist_ok=True)
+        return body, cached
+
+    def test_plugin_without_shared_links_stays_claude_only(self) -> None:
+        _, cached = self.plugin_fixture()
+        result = self.run_osk("scan", "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = json.loads(self.manifest.read_text())["skills"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["source"], "plugin")
+        self.assertEqual(entries[0]["scope"], ["claude"])
+        self.assertEqual(entries[0]["body"], str(cached))
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_shared_plugin_skill_is_separate_from_plugin_bundle(self) -> None:
+        body, cached = self.plugin_fixture()
+        for client in ("codex", "kimi"):
+            self.link(client, "frontend-design", body)
+        before = {client: os.readlink(self.client_path(client, "frontend-design"))
+                  for client in ("codex", "kimi")}
+        result = self.run_osk("scan", "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = {row["name"]: row for row in json.loads(self.manifest.read_text())["skills"]}
+        self.assertEqual(set(entries), {"frontend-design", "plugin:frontend-design"})
+        self.assertEqual(entries["frontend-design"]["source"], "external")
+        self.assertEqual(entries["frontend-design"]["scope"], ["codex", "kimi"])
+        self.assertEqual(entries["frontend-design"]["body"], str(body))
+        self.assertEqual(entries["plugin:frontend-design"]["body"], str(cached))
+        self.assertEqual(entries["plugin:frontend-design"]["scope"], ["claude"])
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        for client, target in before.items():
+            self.assertEqual(os.readlink(self.client_path(client, "frontend-design")), target)
+
+    def test_scan_and_doctor_recognize_codex_agents_skill_link(self) -> None:
+        body, _ = self.plugin_fixture()
+        agents_link = self.home / ".agents" / "skills" / "frontend-design"
+        agents_link.symlink_to(body, target_is_directory=True)
+        self.link("kimi", "frontend-design", body)
+        result = self.run_osk("scan", "--write")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = {row["name"]: row for row in json.loads(self.manifest.read_text())["skills"]}
+        self.assertEqual(entries["frontend-design"]["scope"], ["codex", "kimi"])
+        self.assertNotIn("review", entries["frontend-design"])
+        listing = self.run_osk("list", "--json")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        rows = {row["name"]: row for row in json.loads(listing.stdout)["skills"]}
+        self.assertEqual(rows["frontend-design"]["clients"]["codex"]["state"], "healthy")
+        self.assertEqual(rows["frontend-design"]["clients"]["codex"]["path"], str(agents_link))
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertEqual(os.readlink(agents_link), str(body))
+        self.assertFalse(self.client_path("codex", "frontend-design").exists())
+
+    def test_agents_real_directory_is_reported_as_unmanaged(self) -> None:
+        self.agent.mkdir(parents=True)
+        body = self.home / ".agents" / "skills" / "local-skill"
+        body.mkdir()
+        (body / "SKILL.md").write_text("# local skill\n", encoding="utf-8")
+        scan = self.run_osk("scan", "--write")
+        self.assertEqual(scan.returncode, 0, scan.stderr)
+        listing = self.run_osk("list", "--json")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        rows = {row["name"]: row for row in json.loads(listing.stdout)["skills"]}
+        status = rows["local-skill"]["clients"]["codex"]
+        self.assertEqual(status["path"], str(body))
+        self.assertEqual(status["state"], "unmanaged")
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 1)
+        issues = json.loads(doctor.stdout)["issues"]
+        self.assertEqual([issue["type"] for issue in issues], ["unmanaged"])
+
+    def test_agents_skill_does_not_hide_conflicting_legacy_codex_link(self) -> None:
+        body = self.body("skills/overlap")
+        wrong = self.body("skills/wrong")
+        (self.home / ".agents" / "skills" / "overlap").symlink_to(body, target_is_directory=True)
+        for client in ("claude", "kimi"):
+            self.link(client, "overlap", body)
+        self.link("codex", "overlap", wrong)
+        self.write_manifest(
+            [{"name": "overlap", "source": "self", "body": str(body), "scope": "shared"}]
+        )
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 1)
+        issues = json.loads(doctor.stdout)["issues"]
+        self.assertTrue(any(issue["type"] == "wrong_target" and issue["client"] == "codex"
+                            for issue in issues))
+
     def test_prune_backups_keeps_requested_number(self) -> None:
         osk = load_osk_module()
         body = self.body("shared/big-skill")
