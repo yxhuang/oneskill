@@ -106,6 +106,29 @@ manifest and re-applied on every `osk update`, so the copied files follow upstre
 If upstream moves a file or changes a link, the update stops before touching the installed
 body instead of shipping a half-adapted skill; fix the overlay in the manifest and rerun.
 
+### Multiple machines
+
+The library's `skills.lock.json` is the portable counterpart to the manifest. It records each
+GitHub (`gh:`) remote skill's name, source URL, resolved ref, scope, and optional overlay, with
+no absolute paths or installation timestamps. Local directory and tarball installs stay only in
+the manifest and are reported as `not lockable (local source)`. Commit the lock file, not the
+downloaded bodies under `remote/`; it points another machine at exactly what to fetch.
+
+`osk install`, `osk update`, and `osk uninstall` maintain their own entries without discarding
+skills recorded on another machine. `osk lock` rebuilds the local entries too, retaining
+lock-only entries by default; add `--prune` to remove them. On a new machine:
+
+```bash
+git pull
+osk restore --dry-run  # preview without downloading
+osk restore            # install missing skills at their locked refs
+```
+
+Existing installations are left unchanged, and a name already taken by a non-remote skill or by a
+conflicting entry in a client directory is skipped with a warning rather than replaced. `skills.json` remains machine-local because it
+contains absolute body paths and describes this machine's links; the lock file is what belongs
+in Git. Set `ONESKILL_LOCK` or the config key `lock` to use a different lock path.
+
 ## Adopting vs. installing
 
 Several tools now manage skills across AI CLIs — [cc-switch](https://github.com/farion1231/cc-switch)
@@ -154,6 +177,8 @@ it as of v3.13 — so at least the bodies stay one copy.
 | `osk outdated [name]` | Check remote skills for updates through the GitHub API. Downloads nothing, changes no skill; `osk list` then marks them with `↑`. |
 | `osk update [name]` | Update one remote skill, or all of them. |
 | `osk uninstall <name>` | Unlink everywhere; the body is kept as a timestamped backup. |
+| `osk lock` | Rebuild the portable lock file. Keeps entries installed only elsewhere unless `--prune` is given; `--dry-run` previews changes. |
+| `osk restore [names...]` | Install missing locked skills at their recorded refs. Existing skills are untouched; `--dry-run` needs no network. |
 | `osk sync` | Reconcile what's on disk against the manifest. Idempotent. |
 | `osk scan --write` | Generate the manifest from your current setup. |
 | `osk init` | First-time configuration. |
@@ -233,7 +258,7 @@ Scanning does not create links or decide whether a skill is portable.
 
 ## Status
 
-Still early. The safety behavior is covered by 46 offline tests, and CI runs on Linux and
+Still early. The safety behavior is covered by 91 offline tests, and CI runs on Linux and
 macOS across Python 3.9 and 3.13, but it has only run on a few machines so far. If you hit a
 bug on another setup, a report would genuinely help.
 

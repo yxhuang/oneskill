@@ -91,10 +91,15 @@ def config() -> dict[str, Path]:
     manifest = os.environ.get("ONESKILL_MANIFEST") or config_string(file_cfg, "manifest", home)
     if not manifest:
         manifest = str(home.joinpath(*CONFIG_DIR_PARTS, "skills.json"))
+    library_path = Path(library).expanduser().absolute()
+    lock = os.environ.get("ONESKILL_LOCK") or config_string(file_cfg, "lock", home)
+    if not lock:
+        lock = str(library_path / "skills.lock.json")
     result = {
         "home": home,
-        "library": Path(library).expanduser().absolute(),
+        "library": library_path,
         "manifest": Path(manifest).expanduser().absolute(),
+        "lock": Path(lock).expanduser().absolute(),
     }
     for client, parts in CLIENTS.items():
         result[client] = home.joinpath(*parts)
@@ -150,7 +155,7 @@ def scope_clients(scope: Any) -> tuple[str, ...]:
         return tuple(CLIENTS)
     if not isinstance(scope, list) or not scope:
         raise OneskillError("scope must be 'shared' or a non-empty list of client names")
-    invalid = [item for item in scope if item not in CLIENTS]
+    invalid = [item for item in scope if not isinstance(item, str) or item not in CLIENTS]
     if invalid:
         raise OneskillError(f"scope contains unknown client name(s): {', '.join(map(str, invalid))}")
     return tuple(client for client in CLIENTS if client in scope)
@@ -225,10 +230,7 @@ def read_manifest(path: Path, allow_missing: bool = False) -> dict[str, Any]:
     return {"version": MANIFEST_VERSION, "skills": entries}
 
 
-def write_manifest(path: Path, data: dict[str, Any]) -> None:
-    entries = [validate_entry(item) for item in data["skills"]]
-    entries.sort(key=lambda item: item["name"].casefold())
-    output = {"version": MANIFEST_VERSION, "skills": entries}
+def write_json_atomic(path: Path, output: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
@@ -242,6 +244,122 @@ def write_manifest(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def write_manifest(path: Path, data: dict[str, Any]) -> None:
+    entries = [validate_entry(item) for item in data["skills"]]
+    entries.sort(key=lambda item: item["name"].casefold())
+    write_json_atomic(path, {"version": MANIFEST_VERSION, "skills": entries})
+
+
+def validate_lock_entry(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise OneskillError("each lock file skills entry must be an object")
+    required = ("name", "source_url", "ref", "scope")
+    missing = [key for key in required if key not in entry]
+    if missing:
+        raise OneskillError(f"lock file entry is missing field(s): {', '.join(missing)}")
+    unknown = set(entry) - {*required, "overlay"}
+    if unknown:
+        raise OneskillError(f"lock file entry has unknown key(s): {', '.join(sorted(unknown))}")
+    name = entry["name"]
+    if not isinstance(name, str):
+        raise OneskillError(f"invalid skill name in lock file: {name!r}")
+    validate_remote_skill_name(name)
+    for key in ("source_url", "ref"):
+        if not isinstance(entry[key], str) or not entry[key]:
+            raise OneskillError(f"{name}: lock file {key} must be a non-empty string")
+    scope_clients(entry["scope"])
+    result = {key: entry[key] for key in required}
+    if "overlay" in entry:
+        result["overlay"] = validate_overlay(entry["overlay"], name)
+    return result
+
+
+def read_lock(path: Path, allow_missing: bool = False) -> dict[str, Any]:
+    if not path.exists():
+        if allow_missing:
+            return {"version": 1, "skills": []}
+        raise OneskillError(f"lock file not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise OneskillError(f"cannot read lock file {path}: {exc}") from exc
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        raise OneskillError(f"lock file {path}: version must be 1")
+    if set(data) != {"version", "skills"} or not isinstance(data.get("skills"), list):
+        raise OneskillError(f"lock file {path}: expected only version and a skills array")
+    entries = [validate_lock_entry(item) for item in data["skills"]]
+    duplicates = sorted(
+        name for name, count in Counter(item["name"] for item in entries).items() if count > 1
+    )
+    if duplicates:
+        raise OneskillError(f"duplicate skill name(s) in lock file: {', '.join(duplicates)}")
+    return {"version": 1, "skills": entries}
+
+
+def prepare_lock(cfg: dict[str, Path], dry_run: bool = False) -> None:
+    """Fail before touching anything when the lock file cannot be read or later written,
+    since lock maintenance runs after the body, links and manifest have already changed."""
+    read_lock(cfg["lock"], allow_missing=True)
+    if dry_run:
+        return
+    path = cfg["lock"]
+    if path.exists() and not os.access(path, os.W_OK):
+        raise OneskillError(f"lock file is not writable: {path}")
+    directory = path.parent
+    while not path_exists(directory) and directory != directory.parent:
+        directory = directory.parent
+    if not directory.is_dir():
+        raise OneskillError(f"lock file directory is blocked by a non-directory: {directory}")
+    if not os.access(directory, os.W_OK | os.X_OK):
+        raise OneskillError(f"lock file directory is not writable: {directory}")
+
+
+def write_lock(path: Path, data: dict[str, Any]) -> None:
+    entries = [validate_lock_entry(item) for item in data["skills"]]
+    entries.sort(key=lambda item: (item["name"].casefold(), item["name"]))
+    write_json_atomic(path, {"version": 1, "skills": entries})
+
+
+def lock_entry_from_manifest(entry: dict[str, Any]) -> dict[str, Any] | None:
+    provenance = entry.get("provenance")
+    if not isinstance(provenance, dict):
+        raise OneskillError(f"remote skill {entry['name']} has no provenance for the lock file")
+    if not provenance["source_url"].startswith("gh:"):
+        return None
+    locked = {
+        "name": entry["name"],
+        "source_url": provenance["source_url"],
+        "ref": provenance["ref"],
+        "scope": entry["scope"],
+    }
+    if "overlay" in provenance:
+        locked["overlay"] = provenance["overlay"]
+    return validate_lock_entry(locked)
+
+
+def upsert_lock_entry(cfg: dict[str, Path], entry: dict[str, Any]) -> None:
+    lock = read_lock(cfg["lock"], allow_missing=True)
+    locked = lock_entry_from_manifest(entry)
+    if locked is None:
+        print(f"not lockable (local source): {entry['name']}")
+        return
+    for index, existing in enumerate(lock["skills"]):
+        if existing["name"] == locked["name"]:
+            lock["skills"][index] = locked
+            break
+    else:
+        lock["skills"].append(locked)
+    write_lock(cfg["lock"], lock)
+
+
+def remove_lock_entry(cfg: dict[str, Path], name: str) -> None:
+    lock = read_lock(cfg["lock"], allow_missing=True)
+    remaining = [item for item in lock["skills"] if item["name"] != name]
+    if len(remaining) != len(lock["skills"]):
+        lock["skills"] = remaining
+        write_lock(cfg["lock"], lock)
 
 
 def update_cache_path(cfg: dict[str, Path]) -> Path:
@@ -1098,16 +1216,83 @@ def diagnose(inventory: dict[str, Any], cfg: dict[str, Path]) -> dict[str, Any]:
     }
 
 
+def lock_consistency(cfg: dict[str, Path], manifest: dict[str, Any]) -> dict[str, Any]:
+    if not cfg["lock"].exists():
+        return {
+            "path": str(cfg["lock"]),
+            "exists": False,
+            "message": "no lock file",
+            "missing_here": [],
+            "not_in_lock": [],
+            "ref_mismatch": [],
+        }
+    try:
+        lock = read_lock(cfg["lock"])
+    except OneskillError as exc:
+        return {"path": str(cfg["lock"]), "exists": True, "error": str(exc)}
+    local = {
+        entry["name"]: entry for entry in manifest["skills"] if entry["source"] == "remote"
+    }
+    lockable = {}
+    for name, entry in local.items():
+        provenance = entry.get("provenance") or {}
+        if str(provenance.get("source_url", "")).startswith("gh:"):
+            lockable[name] = entry
+    locked = {entry["name"]: entry for entry in lock["skills"]}
+    mismatches = []
+    for name, entry in locked.items():
+        local_entry = local.get(name)
+        if local_entry is None:
+            continue
+        provenance = local_entry.get("provenance") or {}
+        local_ref = provenance.get("ref", "unknown")
+        if local_ref != entry["ref"]:
+            mismatches.append({"name": name, "local_ref": local_ref, "lock_ref": entry["ref"]})
+    return {
+        "path": str(cfg["lock"]),
+        "exists": True,
+        "missing_here": [
+            name for name, entry in locked.items() if not locked_skill_present(local.get(name))
+        ],
+        "not_in_lock": [name for name in lockable if name not in locked],
+        "ref_mismatch": mismatches,
+    }
+
+
+def render_lock_report(report: dict[str, Any]) -> None:
+    print("\nLock file:")
+    if "error" in report:
+        print(f"  {report['error']}")
+        return
+    if not report["exists"]:
+        print("  no lock file")
+        return
+    if not any(report[key] for key in ("missing_here", "not_in_lock", "ref_mismatch")):
+        print("  consistent with this machine")
+        return
+    for name in report["missing_here"]:
+        print(f"  missing here: {name}; run `osk restore {name}`")
+    for name in report["not_in_lock"]:
+        print(f"  not in lock: {name}; run `osk lock`")
+    for item in report["ref_mismatch"]:
+        print(
+            f"  ref differs: {item['name']} "
+            f"(local {item['local_ref']}, lock {item['lock_ref']})"
+        )
+
+
 def render_doctor(report: dict[str, Any]) -> None:
     if not report["issues"]:
         print("No issues found.")
-        return
-    for index, issue in enumerate(report["issues"], 1):
-        endpoint = f" [{issue['client']}]" if issue["client"] else ""
-        print(f"{index}. {issue['skill']}{endpoint}: {issue['message']}")
-        print(f"   path: {issue['path']}")
-        print(f"   fix: {issue['suggested_command']}")
-    print(f"\nFound {report['summary']['issues']} issue(s); doctor made no changes.")
+    else:
+        for index, issue in enumerate(report["issues"], 1):
+            endpoint = f" [{issue['client']}]" if issue["client"] else ""
+            print(f"{index}. {issue['skill']}{endpoint}: {issue['message']}")
+            print(f"   path: {issue['path']}")
+            print(f"   fix: {issue['suggested_command']}")
+        print(f"\nFound {report['summary']['issues']} issue(s); doctor made no changes.")
+    if "lock" in report:
+        render_lock_report(report["lock"])
 
 
 def parse_scope(value: str, origin: str) -> Any:
@@ -1296,6 +1481,7 @@ def rollback_remote_change(
 
 
 def command_install(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    prepare_lock(cfg, args.dry_run)
     manifest = read_manifest(cfg["manifest"], allow_missing=True)
     overlay = read_overlay_file(getattr(args, "overlay", None))
     with materialize_skill_source(args.source) as resolved:
@@ -1416,6 +1602,7 @@ def install_staged_skill(
             replaced_links,
         )
         raise OneskillError(f"installation failed; rolled back as far as possible: {exc}") from exc
+    upsert_lock_entry(cfg, replacement)
     print(f"installed: {name}")
     return 0
 
@@ -1428,6 +1615,7 @@ def render_change_summary(name: str, changes: dict[str, list[str]]) -> None:
 
 
 def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    prepare_lock(cfg, args.dry_run)
     manifest = read_manifest(cfg["manifest"])
     remotes = [item for item in manifest["skills"] if item["source"] == "remote"]
     if args.name:
@@ -1458,6 +1646,18 @@ def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 )
             changes = compare_skill_trees(target, source_dir)
             if not any(changes.values()):
+                ref_changed = provenance.get("ref") != resolved["ref"]
+                if args.dry_run:
+                    if ref_changed:
+                        print(
+                            f"{name}: would update ref {provenance.get('ref')} -> {resolved['ref']}"
+                        )
+                else:
+                    if ref_changed:
+                        provenance["ref"] = resolved["ref"]
+                        write_manifest(cfg["manifest"], manifest)
+                        print(f"{name}: updated ref to {resolved['ref']} (content unchanged)")
+                    upsert_lock_entry(cfg, entry)
                 print(f"{name}: already up to date")
                 continue
             render_change_summary(name, changes)
@@ -1492,6 +1692,7 @@ def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                     [],
                 )
                 raise OneskillError(f"update of {name} failed; rolled back as far as possible: {exc}") from exc
+            upsert_lock_entry(cfg, entry)
             print(f"updated: {name}")
             for stale in prune_backups(target, args.keep_backups):
                 print(f"  removed old backup: {stale}")
@@ -1499,6 +1700,7 @@ def command_update(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
 
 
 def command_uninstall(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    prepare_lock(cfg, args.dry_run)
     manifest = read_manifest(cfg["manifest"])
     entry = next((item for item in manifest["skills"] if item["name"] == args.name), None)
     if entry is None or entry["source"] != "remote":
@@ -1545,8 +1747,192 @@ def command_uninstall(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.symlink_to(raw_target, target_is_directory=True)
         raise OneskillError(f"uninstall failed; rolled back as far as possible: {exc}") from exc
+    remove_lock_entry(cfg, args.name)
     print(f"uninstalled: {args.name}; body preserved at {backup}")
     return 0
+
+
+def command_lock(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    manifest = read_manifest(cfg["manifest"])
+    local = []
+    for entry in manifest["skills"]:
+        if entry["source"] != "remote":
+            continue
+        locked = lock_entry_from_manifest(entry)
+        if locked is None:
+            print(f"not lockable (local source): {entry['name']}")
+        else:
+            local.append(locked)
+    lock = read_lock(cfg["lock"], allow_missing=True)
+    existing = {entry["name"]: entry for entry in lock["skills"]}
+    output = [] if args.prune else list(lock["skills"])
+    positions = {entry["name"]: index for index, entry in enumerate(output)}
+
+    for locked in local:
+        name = locked["name"]
+        if name not in existing:
+            print(f"add: {name}")
+        elif existing[name] != locked:
+            print(f"change: {name} (lock {existing[name]['ref']}, local {locked['ref']})")
+        if args.prune:
+            output.append(locked)
+        elif name in positions:
+            output[positions[name]] = locked
+        else:
+            output.append(locked)
+
+    local_names = {entry["name"] for entry in local}
+    elsewhere = sorted(
+        (name for name in existing if name not in local_names),
+        key=lambda name: (name.casefold(), name),
+    )
+    if args.prune:
+        for name in elsewhere:
+            print(f"remove: {name}")
+    elif elsewhere:
+        print(f"in lock but not installed here: {', '.join(elsewhere)}; run `osk restore`")
+
+    lock["skills"] = output
+    if args.dry_run:
+        print("dry-run complete: no changes made.")
+        return 0
+    write_lock(cfg["lock"], lock)
+    print(f"wrote lock file: {cfg['lock']} ({len(output)} entries)")
+    return 0
+
+
+def source_at_ref(source_url: str, ref: str) -> str:
+    if not source_url.startswith("gh:"):
+        raise OneskillError("restore only supports gh: sources")
+    owner, repo, subdir, _ = parse_github_source(source_url)
+    source = f"gh:{owner}/{repo}"
+    if subdir:
+        source += f"/{subdir}"
+    return f"{source}@{ref}"
+
+
+def manifest_entry(manifest: dict[str, Any], name: str) -> dict[str, Any] | None:
+    return next((item for item in manifest["skills"] if item["name"] == name), None)
+
+
+def locked_skill_present(entry: dict[str, Any] | None) -> bool:
+    return bool(
+        entry is not None
+        and entry.get("body") is not None
+        and Path(entry["body"]).exists()
+    )
+
+
+def restore_client_conflict(name: str, cfg: dict[str, Path]) -> Path | None:
+    target = cfg["library"] / "remote" / name
+    for client in CLIENTS:
+        path = cfg[client] / name
+        if not path_exists(path):
+            continue
+        try:
+            if path.is_symlink() and link_target(path) == normalized(target):
+                continue
+        except (OSError, RuntimeError):
+            pass
+        return path
+    return None
+
+
+def command_restore(args: argparse.Namespace, cfg: dict[str, Path]) -> int:
+    lock = read_lock(cfg["lock"], allow_missing=True)
+    if not cfg["lock"].exists():
+        raise OneskillError(f"lock file not found: {cfg['lock']}")
+    prepare_lock(cfg, args.dry_run)
+    by_name = {entry["name"]: entry for entry in lock["skills"]}
+    if args.names:
+        unknown = [name for name in args.names if name not in by_name]
+        if unknown:
+            raise OneskillError(f"skill(s) not found in lock file: {', '.join(unknown)}")
+        selected = [by_name[name] for name in dict.fromkeys(args.names)]
+    else:
+        selected = lock["skills"]
+
+    counts = Counter()
+    planned = 0
+    for locked in selected:
+        name = locked["name"]
+        manifest = read_manifest(cfg["manifest"], allow_missing=True)
+        if not locked["source_url"].startswith("gh:"):
+            counts["failed"] += 1
+            print(f"failed: {name}: non-GitHub source in lock file", file=sys.stderr)
+            continue
+        declared = manifest_entry(manifest, name)
+        if declared is not None and declared["source"] != "remote":
+            counts["skipped"] += 1
+            print(
+                f"warning: {name}: skipped (exists as {declared['source']})",
+                file=sys.stderr,
+            )
+            continue
+        conflict = restore_client_conflict(name, cfg)
+        if conflict is not None:
+            counts["skipped"] += 1
+            print(
+                f"warning: {name}: skipped (conflicting client item: {conflict}); "
+                "run `osk install` manually to resolve the conflict",
+                file=sys.stderr,
+            )
+            continue
+        local = declared if declared is not None and declared["source"] == "remote" else None
+        if locked_skill_present(local):
+            counts["present"] += 1
+            provenance = local.get("provenance") or {}
+            local_ref = provenance.get("ref", "unknown")
+            if local_ref != locked["ref"]:
+                print(
+                    f"present: {name} (local {local_ref}, lock {locked['ref']}); "
+                    f"run `osk update {name}`"
+                )
+            else:
+                print(f"present: {name}")
+            continue
+        if locked["scope"] != "shared":
+            counts["skipped"] += 1
+            print(
+                f"warning: {name}: skipped (scope is not shared; restore only supports shared skills)",
+                file=sys.stderr,
+            )
+            continue
+        if args.dry_run:
+            planned += 1
+            print(f"would install: {name} at {locked['ref']} from {locked['source_url']}")
+            continue
+
+        item_args = argparse.Namespace(review=False, yes=args.yes, dry_run=False)
+        try:
+            pinned_source = source_at_ref(locked["source_url"], locked["ref"])
+            with materialize_skill_source(pinned_source) as resolved:
+                metadata = read_skill_metadata(Path(resolved["directory"]))
+                if metadata["name"] != name:
+                    raise OneskillError(
+                        f"locked skill {name!r} source declares {metadata['name']!r}"
+                    )
+                resolved["source_url"] = locked["source_url"]
+                with stage_skill_source(resolved, locked.get("overlay"), name) as source_dir:
+                    result = install_staged_skill(
+                        item_args, cfg, manifest, resolved, source_dir, locked.get("overlay")
+                    )
+            if result == 0:
+                counts["installed"] += 1
+            else:
+                counts["skipped"] += 1
+        except Exception as exc:
+            counts["failed"] += 1
+            print(f"failed: {name}: {exc}", file=sys.stderr)
+
+    if args.dry_run:
+        print(f"restore dry-run: {planned} item(s) to install; no downloads or changes made.")
+    print(
+        "restore summary: "
+        f"installed {counts['installed']} / present {counts['present']} / "
+        f"skipped {counts['skipped']} / failed {counts['failed']}"
+    )
+    return 1 if counts["failed"] else 0
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -2132,6 +2518,23 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_parser.add_argument("--dry-run", action="store_true", help="print the plan only")
     uninstall_parser.add_argument("--yes", action="store_true", help="auto-confirm all actions")
 
+    lock_parser = subparsers.add_parser(
+        "lock", help="regenerate the portable lock file from local remote skills"
+    )
+    lock_parser.add_argument("--dry-run", action="store_true", help="print changes only")
+    lock_parser.add_argument(
+        "--prune", action="store_true", help="remove lock entries not installed here"
+    )
+
+    restore_parser = subparsers.add_parser(
+        "restore", help="install missing remote skills at their locked refs"
+    )
+    restore_parser.add_argument("names", nargs="*", help="only restore these locked skill names")
+    restore_parser.add_argument(
+        "--dry-run", action="store_true", help="print the plan without downloading or changing files"
+    )
+    restore_parser.add_argument("--yes", action="store_true", help="auto-confirm all installations")
+
     outdated_parser = subparsers.add_parser(
         "outdated", help="check remote skills for updates via the GitHub API (read-only, no downloads)"
     )
@@ -2154,7 +2557,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             return command_init(args)
         cfg = config()
-        if args.command in {"list", "doctor", "scan", "sync", "install", "update", "uninstall"}:
+        if args.command in {
+            "list", "doctor", "scan", "sync", "install", "update", "uninstall", "lock", "restore"
+        }:
             require_library(cfg)
         if args.command == "scan":
             draft = scan_environment(cfg)
@@ -2175,7 +2580,9 @@ def main(argv: list[str] | None = None) -> int:
                 render_table(inventory)
             return 0
         if args.command == "doctor":
-            report = diagnose(build_inventory(cfg, read_manifest(cfg["manifest"])), cfg)
+            manifest = read_manifest(cfg["manifest"])
+            report = diagnose(build_inventory(cfg, manifest), cfg)
+            report["lock"] = lock_consistency(cfg, manifest)
             if args.json:
                 json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
                 print()
@@ -2192,6 +2599,10 @@ def main(argv: list[str] | None = None) -> int:
             return command_update(args, cfg)
         if args.command == "uninstall":
             return command_uninstall(args, cfg)
+        if args.command == "lock":
+            return command_lock(args, cfg)
+        if args.command == "restore":
+            return command_restore(args, cfg)
         if args.command == "outdated":
             return command_outdated(args, cfg)
         if args.command == "search":

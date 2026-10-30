@@ -77,6 +77,27 @@ skill 的来源、拉到的是哪个 commit、什么时候装的，`osk list` �
 第三方 skill 等于第三方提示词，你的 agent 会照着里面写的执行。装之前用 `--review` 把整个
 `SKILL.md` 打出来看清楚，只装你信得过的来源。
 
+### 多台机器
+
+库里的 `skills.lock.json` 是可跨机器使用的锁文件。它只记录 GitHub（`gh:`）来源的 remote
+skill，包括名称、来源 URL、解析后的 ref、scope 和可选 overlay，不含绝对路径和安装时间。
+本地目录或 tarball 安装只留在 manifest 里，并提示 `not lockable (local source)`。应提交到
+Git 的是这个锁文件，而不是 `remote/` 下下载的本体；另一台机器据此就能知道该取回哪些内容。
+
+`osk install`、`osk update` 和 `osk uninstall` 只维护对应条目，不会丢掉别的机器记录的
+skill。`osk lock` 也会重建本机条目，默认保留只在锁里出现的条目，加 `--prune` 才会删除。
+在新机器上：
+
+```bash
+git pull
+osk restore --dry-run  # 只预览，不下载
+osk restore            # 按锁定的 ref 补装缺失的 skill
+```
+
+已经装好的项目不会改动；同名的非 remote skill，或客户端目录里已有的冲突项，会跳过并警告，不会被替换。`skills.json` 仍是机器本地文件，因为它含有本体的绝对路径，描述
+的是这台机器上的链接；应该入 Git 的是锁文件。可用 `ONESKILL_LOCK` 或配置键 `lock` 改锁文件
+路径。
+
 ## 收上来，和放下去
 
 现在管跨端 skill 的工具不止一个，[cc-switch](https://github.com/farion1231/cc-switch)
@@ -119,6 +140,8 @@ oneskill 在 `osk init` 时会推荐它，cc-switch 从 v3.13 起也支持——
 | `osk outdated [名字]` | 走 GitHub 接口查远程 skill 有没有更新。不下载、不改动任何 skill，查完 `osk list` 会用 `↑` 标出来 |
 | `osk update [名字]` | 更新一个或全部远程 skill |
 | `osk uninstall <名字>` | 各端断链，本体留作带时间戳的备份 |
+| `osk lock` | 重建可跨机器的锁文件。默认保留只在其他机器安装的条目，`--prune` 才删除，`--dry-run` 可预览 |
+| `osk restore [名字...]` | 按锁里的 ref 补装缺失 skill，不动已有项目；`--dry-run` 无需联网 |
 | `osk sync` | 拿磁盘上的实际情况和清单对账，可重复跑 |
 | `osk scan --write` | 按当前环境生成清单 |
 | `osk init` | 首次配置 |
@@ -192,7 +215,7 @@ skill 之后跑一下 `osk adopt`」，让 agent 顺手替你维护，比任何�
 
 ## 现状
 
-还年轻。安全这块有 46 个离线测试盯着，CI 在 Linux 和 macOS 上跑 Python 3.9 和 3.13，
+还年轻。安全这块有 91 个离线测试盯着，CI 在 Linux 和 macOS 上跑 Python 3.9 和 3.13，
 不过目前也就在不多几台机器上用过。要是你在别的环境上碰到问题，欢迎报 bug，对我很有帮助。
 
 ```bash

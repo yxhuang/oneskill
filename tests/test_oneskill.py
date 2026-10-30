@@ -9,12 +9,13 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -49,6 +50,7 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.home = self.base / "home"
         self.agent = self.base / "agent-env"
         self.manifest = self.base / "skills.json"
+        self.lock = self.agent / "skills.lock.json"
         for parts in CLIENT_PATHS.values():
             self.home.joinpath(*parts).mkdir(parents=True)
         (self.home / ".agents" / "skills").mkdir(parents=True)
@@ -57,6 +59,7 @@ class OneskillIntegrationTest(unittest.TestCase):
             ONESKILL_HOME=str(self.home),
             ONESKILL_LIBRARY=str(self.agent),
             ONESKILL_MANIFEST=str(self.manifest),
+            ONESKILL_LOCK=str(self.lock),
         )
 
     def tearDown(self) -> None:
@@ -91,6 +94,40 @@ class OneskillIntegrationTest(unittest.TestCase):
             json.dumps({"version": 1, "skills": entries}, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def write_lock(self, entries: list[dict[str, object]]) -> None:
+        self.lock.parent.mkdir(parents=True, exist_ok=True)
+        self.lock.write_text(
+            json.dumps({"version": 1, "skills": entries}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def make_github_archive(self, source: Path, ref: str = "abcdef123456") -> Path:
+        archive = self.base / f"{source.name}-{ref}.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            handle.add(source, arcname=f"owner-repo-{ref}")
+        return archive
+
+    def set_remote_source(self, name: str, source_url: str, ref: str) -> None:
+        payload = json.loads(self.manifest.read_text(encoding="utf-8"))
+        entry = next(item for item in payload["skills"] if item["name"] == name)
+        entry["provenance"]["source_url"] = source_url
+        entry["provenance"]["ref"] = ref
+        self.manifest.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+    def direct_cfg(self) -> dict[str, Path]:
+        return {
+            "home": self.home,
+            "library": self.agent,
+            "manifest": self.manifest,
+            "lock": self.lock,
+            **{
+                client: self.home.joinpath(*parts)
+                for client, parts in CLIENT_PATHS.items()
+            },
+        }
 
     def run_osk(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -848,6 +885,7 @@ class OneskillIntegrationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("no changes made", result.stdout)
         self.assertFalse(self.manifest.exists())
+        self.assertFalse(self.lock.exists())
         self.assertFalse((self.agent / "remote").exists())
         for client in CLIENT_PATHS:
             self.assertFalse(os.path.lexists(self.client_path(client, "install-preview")))
@@ -926,13 +964,16 @@ class OneskillIntegrationTest(unittest.TestCase):
         installed = self.install_remote(fixture)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         target = self.agent / "remote" / "preview-update"
+        self.write_lock([])
         manifest_before = self.manifest.read_bytes()
+        lock_before = self.lock.read_bytes()
         (fixture / "payload.txt").write_text("preview only\n", encoding="utf-8")
         result = self.run_osk("update", "preview-update", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("modified: payload.txt", result.stdout)
         self.assertEqual((target / "payload.txt").read_text(), "version one\n")
         self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.lock.read_bytes(), lock_before)
         self.assertEqual(list(target.parent.glob("preview-update.oneskill-backup-*")), [])
 
     def test_update_leaves_no_backup_by_default(self) -> None:
@@ -992,7 +1033,9 @@ class OneskillIntegrationTest(unittest.TestCase):
         installed = self.install_remote(fixture)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         target = self.agent / "remote" / "keep-me"
+        self.write_lock([])
         manifest_before = self.manifest.read_bytes()
+        lock_before = self.lock.read_bytes()
         result = self.run_osk("uninstall", "keep-me", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("no changes made", result.stdout)
@@ -1000,7 +1043,736 @@ class OneskillIntegrationTest(unittest.TestCase):
         for client in CLIENT_PATHS:
             self.assertTrue(self.client_path(client, "keep-me").is_symlink())
         self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.lock.read_bytes(), lock_before)
         self.assertEqual(list(target.parent.glob("keep-me.oneskill-backup-*")), [])
+
+    def test_install_upserts_lock_and_preserves_other_machines(self) -> None:
+        elsewhere = {
+            "name": "elsewhere",
+            "source_url": "gh:owner/other/skills/elsewhere@main",
+            "ref": "1234567",
+            "scope": "shared",
+        }
+        self.write_lock([elsewhere])
+        fixture = self.remote_fixture()
+        archive = self.make_github_archive(fixture)
+        osk = load_osk_module()
+
+        def fake_download(url: str, destination: Path) -> None:
+            destination.write_bytes(archive.read_bytes())
+
+        args = SimpleNamespace(
+            source="gh:owner/repo@main", overlay=None, review=False, dry_run=False, yes=True
+        )
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(io.StringIO()):
+                code = osk.command_install(args, self.direct_cfg())
+        self.assertEqual(code, 0)
+        lock = json.loads(self.lock.read_text(encoding="utf-8"))
+        self.assertEqual(lock["version"], 1)
+        self.assertEqual([item["name"] for item in lock["skills"]], ["elsewhere", "remote-demo"])
+        self.assertEqual(lock["skills"][0], elsewhere)
+        installed = lock["skills"][1]
+        self.assertEqual(set(installed), {"name", "source_url", "ref", "scope"})
+        self.assertEqual(installed["source_url"], "gh:owner/repo@main")
+        self.assertNotIn(str(self.base), self.lock.read_text(encoding="utf-8"))
+        self.assertTrue(self.lock.read_bytes().endswith(b"\n"))
+
+    def test_update_upserts_only_updated_lock_entry(self) -> None:
+        fixture = self.remote_fixture(name="update-lock")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.set_remote_source("update-lock", "gh:owner/update-lock@main", "stale")
+        elsewhere = {
+            "name": "elsewhere",
+            "source_url": "gh:owner/other@main",
+            "ref": "1234567",
+            "scope": "shared",
+        }
+        self.write_lock(
+            [
+                {
+                    "name": "update-lock",
+                    "source_url": "gh:owner/update-lock@main",
+                    "ref": "stale",
+                    "scope": "shared",
+                },
+                elsewhere,
+            ]
+        )
+        (fixture / "payload.txt").write_text("version two\n", encoding="utf-8")
+        archive = self.make_github_archive(fixture)
+        osk = load_osk_module()
+
+        def fake_download(url: str, destination: Path) -> None:
+            destination.write_bytes(archive.read_bytes())
+
+        args = SimpleNamespace(name="update-lock", dry_run=False, yes=True, keep_backups=0)
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(io.StringIO()):
+                code = osk.command_update(args, self.direct_cfg())
+        self.assertEqual(code, 0)
+        entries = {
+            item["name"]: item for item in json.loads(self.lock.read_text())["skills"]
+        }
+        self.assertEqual(entries["update-lock"]["ref"], "abcdef123456")
+        self.assertEqual(entries["elsewhere"], elsewhere)
+
+    def test_uninstall_removes_only_its_lock_entry(self) -> None:
+        first = self.install_remote(self.remote_fixture(name="remove-lock"))
+        second = self.install_remote(self.remote_fixture(name="keep-lock"))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        locked = []
+        for name in ("remove-lock", "keep-lock"):
+            self.set_remote_source(name, f"gh:owner/{name}@main", "abcdef1")
+            locked.append(
+                {
+                    "name": name,
+                    "source_url": f"gh:owner/{name}@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+            )
+        self.write_lock(locked)
+        result = self.run_osk("uninstall", "remove-lock", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        entries = json.loads(self.lock.read_text())["skills"]
+        self.assertEqual([item["name"] for item in entries], ["keep-lock"])
+
+    def test_lock_preserves_elsewhere_by_default_and_prunes_on_request(self) -> None:
+        installed = self.install_remote(self.remote_fixture(name="installed-here"))
+        local = self.install_remote(self.remote_fixture(name="local-only"))
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(local.returncode, 0, local.stderr)
+        self.set_remote_source("installed-here", "gh:owner/installed-here@main", "abcdef1")
+        elsewhere = {
+            "name": "elsewhere",
+            "source_url": "gh:owner/other@main",
+            "ref": "1234567",
+            "scope": "shared",
+        }
+        self.write_lock([elsewhere])
+        before = self.lock.read_bytes()
+
+        preview = self.run_osk("lock", "--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stderr + preview.stdout)
+        self.assertIn("not lockable (local source): local-only", preview.stdout)
+        self.assertIn("in lock but not installed here: elsewhere", preview.stdout)
+        self.assertIn("osk restore", preview.stdout)
+        self.assertEqual(self.lock.read_bytes(), before)
+
+        preserved = self.run_osk("lock")
+        self.assertEqual(preserved.returncode, 0, preserved.stderr + preserved.stdout)
+        self.assertIn("elsewhere", self.lock.read_text())
+        self.assertNotIn("local-only", self.lock.read_text())
+        pruned = self.run_osk("lock", "--prune")
+        self.assertEqual(pruned.returncode, 0, pruned.stderr + pruned.stdout)
+        self.assertIn("remove: elsewhere", pruned.stdout)
+        self.assertEqual(
+            [item["name"] for item in json.loads(self.lock.read_text())["skills"]],
+            ["installed-here"],
+        )
+
+    def test_restore_installs_locked_ref_source_url_and_overlay(self) -> None:
+        source, overlay_path = self.overlay_fixture(name="restored")
+        archive = self.base / "upstream.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            handle.add(source, arcname="owner-repo-abcdef123456")
+        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+        original_source = "gh:owner/repo@main"
+        self.write_lock(
+            [
+                {
+                    "name": "restored",
+                    "source_url": original_source,
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                    "overlay": overlay,
+                }
+            ]
+        )
+        osk = load_osk_module()
+        urls = []
+
+        def fake_download(url: str, destination: Path) -> None:
+            urls.append(url)
+            destination.write_bytes(archive.read_bytes())
+
+        out = io.StringIO()
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(out):
+                code = osk.command_restore(
+                    SimpleNamespace(names=[], dry_run=False, yes=True), self.direct_cfg()
+                )
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(urls, ["https://api.github.com/repos/owner/repo/tarball/abcdef1"])
+        entry = json.loads(self.manifest.read_text())["skills"][0]
+        self.assertEqual(entry["provenance"]["source_url"], original_source)
+        self.assertEqual(entry["provenance"]["ref"], "abcdef123456")
+        installed = self.agent / "remote" / "restored"
+        self.assertEqual((installed / "references" / "protocol.md").read_text(), "tolerance 0.01\n")
+        self.assertIn("(references/protocol.md)", (installed / "SKILL.md").read_text())
+        locked = json.loads(self.lock.read_text())["skills"][0]
+        self.assertEqual(locked["ref"], "abcdef123456")
+        self.assertEqual(locked["source_url"], original_source)
+
+    def test_restore_present_makes_no_changes(self) -> None:
+        fixture = self.remote_fixture(name="already-here")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.set_remote_source("already-here", "gh:owner/already-here@main", "local")
+        self.write_lock(
+            [
+                {
+                    "name": "already-here",
+                    "source_url": "gh:owner/already-here@main",
+                    "ref": "locked-ref",
+                    "scope": "shared",
+                }
+            ]
+        )
+        manifest_before = self.manifest.read_bytes()
+        lock_before = self.lock.read_bytes()
+        target = self.agent / "remote" / "already-here"
+        inode_before = target.stat().st_ino
+
+        result = self.run_osk("restore", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("present: already-here (local local, lock locked-ref)", result.stdout)
+        self.assertIn("osk update already-here", result.stdout)
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.lock.read_bytes(), lock_before)
+        self.assertEqual(target.stat().st_ino, inode_before)
+
+    def test_restore_skips_non_shared_scope(self) -> None:
+        self.write_lock(
+            [
+                {
+                    "name": "single-client",
+                    "source_url": "gh:owner/single-client@main",
+                    "ref": "abcdef1",
+                    "scope": ["claude"],
+                }
+            ]
+        )
+        result = self.run_osk("restore", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("skipped", result.stderr)
+        self.assertIn("skipped 1 / failed 0", result.stdout)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse((self.agent / "remote" / "single-client").exists())
+
+    def test_restore_continues_after_item_failure(self) -> None:
+        fixture = self.remote_fixture(name="good-restore")
+        archive = self.make_github_archive(fixture)
+        self.write_lock(
+            [
+                {
+                    "name": name,
+                    "source_url": f"gh:owner/{name}@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+                for name in ("broken-restore", "good-restore")
+            ]
+        )
+        osk = load_osk_module()
+
+        def fake_download(url: str, destination: Path) -> None:
+            if "/broken-restore/" in url:
+                raise osk.OneskillError("forced download failure")
+            destination.write_bytes(archive.read_bytes())
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = osk.command_restore(
+                    SimpleNamespace(names=[], dry_run=False, yes=True), self.direct_cfg()
+                )
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("failed: broken-restore", err.getvalue())
+        self.assertIn("installed: good-restore", out.getvalue())
+        self.assertIn("installed 1 / present 0 / skipped 0 / failed 1", out.getvalue())
+        self.assertTrue((self.agent / "remote" / "good-restore" / "SKILL.md").is_file())
+
+    def test_restore_dry_run_makes_no_changes_or_downloads(self) -> None:
+        self.write_manifest([])
+        self.write_lock(
+            [
+                {
+                    "name": "not-downloaded",
+                    "source_url": "gh:owner/repo/skills/not-downloaded@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+            ]
+        )
+        manifest_before = self.manifest.read_bytes()
+        lock_before = self.lock.read_bytes()
+        result = self.run_osk("restore", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("would install: not-downloaded at abcdef1", result.stdout)
+        self.assertIn("no downloads or changes made", result.stdout)
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.lock.read_bytes(), lock_before)
+        self.assertFalse((self.agent / "remote").exists())
+
+    def test_doctor_reports_lock_consistency_without_changing_exit_code(self) -> None:
+        for name in ("different-ref", "local-only"):
+            installed = self.install_remote(self.remote_fixture(name=name))
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.set_remote_source(name, f"gh:owner/{name}@main", "local")
+        self.write_lock(
+            [
+                {
+                    "name": "different-ref",
+                    "source_url": "gh:owner/different@main",
+                    "ref": "locked-ref",
+                    "scope": "shared",
+                },
+                {
+                    "name": "missing-here",
+                    "source_url": "gh:owner/missing@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                },
+            ]
+        )
+        result = self.run_osk("doctor", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["summary"]["issues"], 0)
+        self.assertEqual(report["lock"]["missing_here"], ["missing-here"])
+        self.assertEqual(report["lock"]["not_in_lock"], ["local-only"])
+        self.assertEqual(
+            report["lock"]["ref_mismatch"],
+            [{"name": "different-ref", "local_ref": "local", "lock_ref": "locked-ref"}],
+        )
+        text = self.run_osk("doctor")
+        self.assertEqual(text.returncode, 0, text.stderr + text.stdout)
+        self.assertIn("Lock file:", text.stdout)
+        self.assertIn("missing here: missing-here", text.stdout)
+        self.assertIn("not in lock: local-only", text.stdout)
+
+    def test_doctor_reports_no_lock_file(self) -> None:
+        self.agent.mkdir(parents=True)
+        self.write_manifest([])
+        result = self.run_osk("doctor")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("no lock file", result.stdout)
+        report = json.loads(self.run_osk("doctor", "--json").stdout)
+        self.assertFalse(report["lock"]["exists"])
+        self.assertEqual(report["lock"]["message"], "no lock file")
+
+    def test_bad_lock_file_is_clear_error(self) -> None:
+        self.agent.mkdir(parents=True)
+        self.write_manifest([])
+        self.lock.write_text("{not json\n", encoding="utf-8")
+        result = self.run_osk("lock")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read lock file", result.stderr)
+        self.assertIn(str(self.lock), result.stderr)
+
+    def test_restore_skips_non_remote_manifest_entries(self) -> None:
+        entries = []
+        locked = []
+        for source in ("self", "vendor", "external", "plugin"):
+            name = f"declared-{source}"
+            body = self.base / "declared" / name
+            body.mkdir(parents=True)
+            entries.append(
+                {
+                    "name": name,
+                    "source": source,
+                    "body": str(body),
+                    "scope": ["claude"] if source == "plugin" else "shared",
+                }
+            )
+            locked.append(
+                {
+                    "name": name,
+                    "source_url": f"gh:owner/{name}@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+            )
+        self.write_manifest(entries)
+        self.write_lock(locked)
+        before = self.manifest.read_bytes()
+        osk = load_osk_module()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            osk, "materialize_skill_source", side_effect=AssertionError("must not install")
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = osk.command_restore(
+                    SimpleNamespace(names=[], dry_run=False, yes=True), self.direct_cfg()
+                )
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIn("skipped 4 / failed 0", out.getvalue())
+        for source in ("self", "vendor", "external", "plugin"):
+            self.assertIn(f"exists as {source}", err.getvalue())
+        self.assertEqual(self.manifest.read_bytes(), before)
+        self.assertFalse((self.agent / "remote").exists())
+
+    def test_restore_skips_client_conflicts_without_replacing(self) -> None:
+        self.write_manifest([])
+        self.write_lock(
+            [
+                {
+                    "name": name,
+                    "source_url": f"gh:owner/{name}@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+                for name in ("link-conflict", "real-conflict")
+            ]
+        )
+        real = self.client_path("claude", "real-conflict")
+        real.mkdir()
+        marker = real / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        elsewhere = self.body("vendor/elsewhere")
+        wrong_link = self.client_path("codex", "link-conflict")
+        self.link("codex", "link-conflict", elsewhere)
+        raw_target = os.readlink(wrong_link)
+        osk = load_osk_module()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            osk, "materialize_skill_source", side_effect=AssertionError("must not install")
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = osk.command_restore(
+                    SimpleNamespace(names=[], dry_run=False, yes=True), self.direct_cfg()
+                )
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIn("skipped 2 / failed 0", out.getvalue())
+        self.assertIn("osk install", err.getvalue())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(os.readlink(wrong_link), raw_target)
+        self.assertFalse((self.agent / "remote").exists())
+        self.assertEqual(self.client_backups("claude", "real-conflict"), [])
+        self.assertEqual(self.client_backups("codex", "link-conflict"), [])
+
+    def test_install_rejects_corrupt_lock_before_changes(self) -> None:
+        fixture = self.remote_fixture(name="corrupt-install")
+        self.write_lock([])
+        self.lock.write_text("{bad lock\n", encoding="utf-8")
+        before = self.lock.read_bytes()
+        result = self.install_remote(fixture)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read lock file", result.stderr)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse((self.agent / "remote").exists())
+        self.assertEqual(self.lock.read_bytes(), before)
+        for client in CLIENT_PATHS:
+            self.assertFalse(os.path.lexists(self.client_path(client, "corrupt-install")))
+
+    def test_update_rejects_corrupt_lock_before_changes(self) -> None:
+        fixture = self.remote_fixture(name="corrupt-update")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "corrupt-update"
+        manifest_before = self.manifest.read_bytes()
+        self.lock.write_text("{bad lock\n", encoding="utf-8")
+        lock_before = self.lock.read_bytes()
+        (fixture / "payload.txt").write_text("must not install\n", encoding="utf-8")
+        result = self.run_osk("update", "corrupt-update", "--yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read lock file", result.stderr)
+        self.assertEqual((target / "payload.txt").read_text(), "version one\n")
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.lock.read_bytes(), lock_before)
+
+    def test_uninstall_rejects_corrupt_lock_before_changes(self) -> None:
+        fixture = self.remote_fixture(name="corrupt-uninstall")
+        installed = self.install_remote(fixture)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        target = self.agent / "remote" / "corrupt-uninstall"
+        manifest_before = self.manifest.read_bytes()
+        self.lock.write_text("{bad lock\n", encoding="utf-8")
+        lock_before = self.lock.read_bytes()
+        result = self.run_osk("uninstall", "corrupt-uninstall", "--yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read lock file", result.stderr)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(self.lock.read_bytes(), lock_before)
+        for client in CLIENT_PATHS:
+            self.assertTrue(self.client_path(client, "corrupt-uninstall").is_symlink())
+
+    def test_restore_rejects_corrupt_lock_before_changes(self) -> None:
+        self.write_lock([])
+        self.lock.write_text("{bad lock\n", encoding="utf-8")
+        before = self.lock.read_bytes()
+        result = self.run_osk("restore", "--yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read lock file", result.stderr)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse((self.agent / "remote").exists())
+        self.assertEqual(self.lock.read_bytes(), before)
+
+    def test_restore_reloads_manifest_after_failed_item(self) -> None:
+        archives = {}
+        locked = []
+        for name in ("failed-first", "good-second"):
+            source = self.remote_fixture(name=name)
+            archives[name] = self.make_github_archive(source)
+            locked.append(
+                {
+                    "name": name,
+                    "source_url": f"gh:owner/{name}@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+            )
+        self.write_lock(locked)
+        osk = load_osk_module()
+        original_write_manifest = osk.write_manifest
+        write_calls = []
+
+        def fake_download(url: str, destination: Path) -> None:
+            name = "failed-first" if "/failed-first/" in url else "good-second"
+            destination.write_bytes(archives[name].read_bytes())
+
+        def fail_first_write(path: Path, data: dict[str, object]) -> None:
+            write_calls.append(path)
+            if len(write_calls) == 1:
+                raise OSError("forced manifest failure")
+            original_write_manifest(path, data)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with mock.patch.object(osk, "write_manifest", side_effect=fail_first_write):
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = osk.command_restore(
+                        SimpleNamespace(names=[], dry_run=False, yes=True), self.direct_cfg()
+                    )
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("failed: failed-first", err.getvalue())
+        entries = json.loads(self.manifest.read_text())["skills"]
+        self.assertEqual([item["name"] for item in entries], ["good-second"])
+        self.assertFalse((self.agent / "remote" / "failed-first").exists())
+        self.assertTrue((self.agent / "remote" / "good-second").is_dir())
+
+    def test_local_install_is_not_lockable(self) -> None:
+        elsewhere = {
+            "name": "elsewhere",
+            "source_url": "gh:owner/elsewhere@main",
+            "ref": "abcdef1",
+            "scope": "shared",
+        }
+        self.write_lock([elsewhere])
+        before = self.lock.read_bytes()
+        result = self.install_remote(self.remote_fixture(name="local-only"))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("not lockable (local source): local-only", result.stdout)
+        self.assertEqual(self.lock.read_bytes(), before)
+        self.assertEqual(json.loads(self.lock.read_text())["skills"], [elsewhere])
+
+    def test_restore_rejects_non_github_lock_source(self) -> None:
+        fixture = self.remote_fixture(name="local-restore")
+        self.write_lock(
+            [
+                {
+                    "name": "local-restore",
+                    "source_url": str(fixture),
+                    "ref": "local",
+                    "scope": "shared",
+                }
+            ]
+        )
+        result = self.run_osk("restore", "--yes")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn("non-GitHub source", result.stderr)
+        self.assertIn("failed 1", result.stdout)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse((self.agent / "remote" / "local-restore").exists())
+
+    def test_noop_update_refreshes_ref_and_backfills_lock(self) -> None:
+        name = "noop-gh"
+        fixture = self.remote_fixture(name=name)
+        archive = self.make_github_archive(fixture)
+        target = self.agent / "remote" / name
+        target.parent.mkdir(parents=True)
+        shutil.copytree(fixture, target)
+        self.write_manifest(
+            [
+                {
+                    "name": name,
+                    "source": "remote",
+                    "body": str(target),
+                    "scope": "shared",
+                    "description": "A remote test skill.",
+                    "provenance": {
+                        "source_url": f"gh:owner/{name}@main",
+                        "ref": "stale-ref",
+                        "installed_at": "2026-01-01T00:00:00+00:00",
+                    },
+                }
+            ]
+        )
+        osk = load_osk_module()
+
+        def fake_download(url: str, destination: Path) -> None:
+            destination.write_bytes(archive.read_bytes())
+
+        args = SimpleNamespace(name=name, dry_run=True, yes=True, keep_backups=0)
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(io.StringIO()):
+                preview = osk.command_update(args, self.direct_cfg())
+        self.assertEqual(preview, 0)
+        self.assertEqual(
+            json.loads(self.manifest.read_text())["skills"][0]["provenance"]["ref"],
+            "stale-ref",
+        )
+        self.assertFalse(self.lock.exists())
+
+        args.dry_run = False
+        inode_before = target.stat().st_ino
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(io.StringIO()):
+                updated = osk.command_update(args, self.direct_cfg())
+        self.assertEqual(updated, 0)
+        entry = json.loads(self.manifest.read_text())["skills"][0]
+        self.assertEqual(entry["provenance"]["ref"], "abcdef123456")
+        self.assertEqual(entry["provenance"]["installed_at"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(target.stat().st_ino, inode_before)
+        self.assertEqual(json.loads(self.lock.read_text())["skills"][0]["ref"], "abcdef123456")
+
+        self.lock.unlink()
+        manifest_before = self.manifest.read_bytes()
+        with mock.patch.object(osk, "download_url", side_effect=fake_download):
+            with redirect_stdout(io.StringIO()):
+                backfilled = osk.command_update(args, self.direct_cfg())
+        self.assertEqual(backfilled, 0)
+        self.assertEqual(self.manifest.read_bytes(), manifest_before)
+        self.assertEqual(json.loads(self.lock.read_text())["skills"][0]["name"], name)
+
+    def test_doctor_reports_corrupt_lock_without_changing_exit_code(self) -> None:
+        self.agent.mkdir(parents=True)
+        self.write_manifest([])
+        self.lock.write_text("{bad lock\n", encoding="utf-8")
+        healthy = self.run_osk("doctor", "--json")
+        self.assertEqual(healthy.returncode, 0, healthy.stderr + healthy.stdout)
+        report = json.loads(healthy.stdout)
+        self.assertEqual(report["issues"], [])
+        self.assertIn("cannot read lock file", report["lock"]["error"])
+        text = self.run_osk("doctor")
+        self.assertEqual(text.returncode, 0, text.stderr + text.stdout)
+        self.assertIn("Lock file:", text.stdout)
+        self.assertIn("cannot read lock file", text.stdout)
+
+        self.build_audit_fixture()
+        unhealthy = self.run_osk("doctor", "--json")
+        self.assertEqual(unhealthy.returncode, 1, unhealthy.stderr + unhealthy.stdout)
+        report = json.loads(unhealthy.stdout)
+        self.assertTrue(report["issues"])
+        self.assertIn("cannot read lock file", report["lock"]["error"])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses file modes")
+    def test_install_rejects_unwritable_lock_before_changes(self) -> None:
+        fixture = self.remote_fixture(name="readonly-lock")
+        self.write_lock([])
+        self.lock.chmod(0o444)
+        try:
+            result = self.install_remote(fixture)
+        finally:
+            self.lock.chmod(0o644)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not writable", result.stderr)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse((self.agent / "remote").exists())
+        for client in CLIENT_PATHS:
+            self.assertFalse(os.path.lexists(self.client_path(client, "readonly-lock")))
+
+    def test_prepare_lock_rejects_unwritable_or_blocked_lock_path(self) -> None:
+        osk = load_osk_module()
+        self.agent.mkdir(parents=True)
+        blocker = self.base / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        cfg = dict(self.direct_cfg(), lock=blocker / "nested" / "skills.lock.json")
+        with self.assertRaisesRegex(osk.OneskillError, "non-directory"):
+            osk.prepare_lock(cfg)
+        osk.prepare_lock(cfg, dry_run=True)
+        if not (hasattr(os, "geteuid") and os.geteuid() == 0):
+            readonly = self.base / "readonly"
+            readonly.mkdir()
+            readonly.chmod(0o555)
+            try:
+                cfg = dict(self.direct_cfg(), lock=readonly / "skills.lock.json")
+                with self.assertRaisesRegex(osk.OneskillError, "not writable"):
+                    osk.prepare_lock(cfg)
+            finally:
+                readonly.chmod(0o755)
+
+    def test_restore_skips_client_symlink_loop(self) -> None:
+        self.write_manifest([])
+        self.write_lock(
+            [
+                {
+                    "name": "looped",
+                    "source_url": "gh:owner/looped@main",
+                    "ref": "abcdef1",
+                    "scope": "shared",
+                }
+            ]
+        )
+        loop = self.client_path("claude", "looped")
+        loop.symlink_to(loop)
+        osk = load_osk_module()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            osk, "materialize_skill_source", side_effect=AssertionError("must not install")
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                code = osk.command_restore(
+                    SimpleNamespace(names=[], dry_run=False, yes=True), self.direct_cfg()
+                )
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIn("skipped 1 / failed 0", out.getvalue())
+        self.assertTrue(loop.is_symlink())
+
+    def test_doctor_reports_undecodable_and_bad_scope_lock_as_error(self) -> None:
+        self.agent.mkdir(parents=True)
+        self.write_manifest([])
+        bad_scope = json.dumps(
+            {
+                "version": 1,
+                "skills": [
+                    {"name": "x", "source_url": "gh:o/x", "ref": "abcdef1", "scope": [{}]}
+                ],
+            }
+        )
+        for payload in (b"\xff\xfe not utf-8", bad_scope.encode("utf-8")):
+            self.lock.write_bytes(payload)
+            result = self.run_osk("doctor", "--json")
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertIn("error", json.loads(result.stdout)["lock"])
+
+    def test_doctor_tolerates_null_provenance_with_lock(self) -> None:
+        body = self.body("remote/null-provenance")
+        for client in CLIENT_PATHS:
+            self.link(client, "null-provenance", body)
+        self.write_manifest(
+            [
+                {
+                    "name": "null-provenance",
+                    "source": "remote",
+                    "body": str(body),
+                    "scope": "shared",
+                    "provenance": None,
+                }
+            ]
+        )
+        self.write_lock([])
+        result = self.run_osk("doctor", "--json")
+        self.assertNotIn("Traceback", result.stderr)
+        report = json.loads(result.stdout)
+        self.assertNotIn("error", report["lock"])
+        self.assertEqual(report["lock"]["not_in_lock"], [])
 
 
 class OneskillConfigTest(unittest.TestCase):
@@ -1015,11 +1787,12 @@ class OneskillConfigTest(unittest.TestCase):
         self.home = self.base / "home"
         self.library = self.base / "library"
         self.manifest = self.base / "skills.json"
+        self.lock = self.base / "configured-skills.lock.json"
         self.config_path = self.home / ".config" / "oneskill" / "config.json"
         for parts in CLIENT_PATHS.values():
             self.home.joinpath(*parts).mkdir(parents=True)
         self.env = os.environ.copy()
-        for key in ("ONESKILL_LIBRARY", "ONESKILL_MANIFEST"):
+        for key in ("ONESKILL_LIBRARY", "ONESKILL_MANIFEST", "ONESKILL_LOCK"):
             self.env.pop(key, None)
         self.env["ONESKILL_HOME"] = str(self.home)
 
@@ -1060,7 +1833,10 @@ class OneskillConfigTest(unittest.TestCase):
     def write_config(self, library: Path, manifest: Path) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(
-            json.dumps({"library": str(library), "manifest": str(manifest)}) + "\n",
+            json.dumps(
+                {"library": str(library), "manifest": str(manifest), "lock": str(self.lock)}
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -1073,6 +1849,9 @@ class OneskillConfigTest(unittest.TestCase):
         self.assertEqual(payload["manifest"], str(self.manifest))
         rows = {row["name"]: row for row in payload["skills"]}
         self.assertTrue(all(v["state"] == "healthy" for v in rows["demo"]["clients"].values()))
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stderr + doctor.stdout)
+        self.assertEqual(json.loads(doctor.stdout)["lock"]["path"], str(self.lock))
 
     def test_env_vars_override_config_file(self) -> None:
         self.make_fixture(self.library, self.manifest)
@@ -1080,10 +1859,13 @@ class OneskillConfigTest(unittest.TestCase):
         self.write_config(self.base / "bogus-library", self.base / "bogus-manifest.json")
         self.env["ONESKILL_LIBRARY"] = str(self.library)
         self.env["ONESKILL_MANIFEST"] = str(self.manifest)
+        self.env["ONESKILL_LOCK"] = str(self.base / "env-lock.json")
         result = self.run_osk("list", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["manifest"], str(self.manifest))
+        doctor = self.run_osk("doctor", "--json")
+        self.assertEqual(json.loads(doctor.stdout)["lock"]["path"], self.env["ONESKILL_LOCK"])
 
     def test_missing_library_error_points_to_init(self) -> None:
         self.env["ONESKILL_LIBRARY"] = str(self.base / "no-such-library")
